@@ -58,6 +58,8 @@ class RotateCali final : public rclcpp::Node {
     Cloud::Ptr latest_gimbal_cloud{new Cloud};
     rclcpp::Time latest_stamp{0, 0, RCL_ROS_TIME};
     std::size_t map_updates = 0;
+    double min_yaw = 0.0;
+    double max_yaw = 0.0;
   };
 
   RotateCali() : Node("rotate_cali") {
@@ -74,6 +76,10 @@ class RotateCali final : public rclcpp::Node {
     min_points_ = declare_parameter<int>("min_points", 150);
     window_size_ = declare_parameter<int>("window_size", 40);
     max_map_points_ = declare_parameter<int>("max_map_points", 200000);
+    min_yaw_excitation_deg_ = declare_parameter<double>("min_yaw_excitation_deg", 60.0);
+    convergence_translation_std_ = declare_parameter<double>("convergence_translation_std", 0.01);
+    convergence_rotation_std_deg_ = declare_parameter<double>("convergence_rotation_std_deg", 0.2);
+    convergence_stable_reports_ = declare_parameter<int>("convergence_stable_reports", 5);
     auto qos = rclcpp::SensorDataQoS();
     cloud_sub_[0] = create_subscription<Msg>(cloud_topic_[0], qos, [this](Msg::ConstSharedPtr m) { cloudCallback(0, m); });
     cloud_sub_[1] = create_subscription<Msg>(cloud_topic_[1], qos, [this](Msg::ConstSharedPtr m) { cloudCallback(1, m); });
@@ -141,7 +147,7 @@ class RotateCali final : public rclcpp::Node {
   void processCloudLocked(int id, const rclcpp::Time &stamp, const Cloud::Ptr &cloud) {
     auto &s=lidar_[id]; const double d_yaw=s.imu_yaw-s.used_imu_yaw; const Eigen::Matrix4f guess=s.pose_local.matrix().cast<float>()*yawMatrix(d_yaw); Iso local_pose; double fitness=0.0;
     if (!registerCloud(s.map,cloud,guess,local_pose,fitness)) { RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),3000,"lidar%d GICP rejected (fitness %.4f)",id+1,fitness); return; }
-    s.pose_local=local_pose; s.used_imu_yaw=s.imu_yaw; ++s.map_updates;
+    s.pose_local=local_pose; s.used_imu_yaw=s.imu_yaw; s.min_yaw=std::min(s.min_yaw,s.imu_yaw); s.max_yaw=std::max(s.max_yaw,s.imu_yaw); ++s.map_updates;
     Cloud::Ptr transformed(new Cloud); pcl::transformPointCloud(*cloud,*transformed,local_pose.matrix().cast<float>()); *s.map += *transformed;
     if (s.map->size()>static_cast<std::size_t>(max_map_points_) || s.map_updates%10==0) s.map=downsample(s.map);
     const Iso world_pose=s.initial_world*s.pose_local; const Eigen::Matrix3d motion=world_pose.rotation()*s.initial_world.rotation().transpose(); const double yaw=std::atan2(motion(1,0),motion(0,0)); const Iso world_gimbal(Eigen::AngleAxisd(yaw,Eigen::Vector3d::UnitZ())); const Iso ext=world_gimbal.inverse()*world_pose;
@@ -152,17 +158,26 @@ class RotateCali final : public rclcpp::Node {
     if (q.empty()) return Iso::Identity(); Eigen::Vector3d t=Eigen::Vector3d::Zero(); Eigen::Quaterniond sum(0,0,0,0),ref(q.front().first.rotation());
     for (const auto &m:q) { t+=m.first.translation(); Eigen::Quaterniond x(m.first.rotation()); if(x.dot(ref)<0)x.coeffs()*=-1; sum.coeffs()+=x.coeffs(); } t/=static_cast<double>(q.size()); sum.normalize(); Iso out=Iso::Identity(); out.linear()=sum.toRotationMatrix(); out.translation()=t; return out;
   }
+  struct ConvergenceStats { double translation_std=std::numeric_limits<double>::infinity(); double rotation_std_deg=std::numeric_limits<double>::infinity(); double fitness_mean=std::numeric_limits<double>::infinity(); };
+  static ConvergenceStats convergenceStats(const std::deque<std::pair<Iso,double>> &q,const Iso &mean) {
+    ConvergenceStats out; if(q.empty())return out; double t2=0.0,r2=0.0,fit=0.0; const Eigen::Quaterniond qm(mean.rotation());
+    for(const auto &m:q){t2+=(m.first.translation()-mean.translation()).squaredNorm();Eigen::Quaterniond qi(m.first.rotation());const double dot=std::clamp(std::abs(qi.dot(qm)),0.0,1.0);const double angle=2.0*std::acos(dot);r2+=angle*angle;fit+=m.second;}
+    out.translation_std=std::sqrt(t2/static_cast<double>(q.size()));out.rotation_std_deg=std::sqrt(r2/static_cast<double>(q.size()))*180.0/M_PI;out.fitness_mean=fit/static_cast<double>(q.size());return out;
+  }
   void publishCloud(const Cloud::Ptr &cloud,const rclcpp::Time &stamp,const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub) const { if(!cloud||cloud->empty())return; sensor_msgs::msg::PointCloud2 msg; pcl::toROSMsg(*cloud,msg); msg.header.stamp=stamp; msg.header.frame_id="gimbal"; pub->publish(msg); }
   void reportAndPublish() {
-    std::lock_guard<std::mutex> lock(mutex_); if(!initialized_)return; const Iso e1=averageExtrinsic(lidar_[0].extrinsics),e2=averageExtrinsic(lidar_[1].extrinsics),rel=e1.inverse()*e2; writeYaml(e1,e2,rel);
+    std::lock_guard<std::mutex> lock(mutex_); if(!initialized_){RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),3000,"[WAITING] collecting the initial static data");return;}
+    const Iso e1=averageExtrinsic(lidar_[0].extrinsics),e2=averageExtrinsic(lidar_[1].extrinsics),rel=e1.inverse()*e2; const auto st1=convergenceStats(lidar_[0].extrinsics,e1),st2=convergenceStats(lidar_[1].extrinsics,e2);
+    const double yaw1=(lidar_[0].max_yaw-lidar_[0].min_yaw)*180.0/M_PI,yaw2=(lidar_[1].max_yaw-lidar_[1].min_yaw)*180.0/M_PI; const bool full=lidar_[0].extrinsics.size()>=static_cast<std::size_t>(window_size_)&&lidar_[1].extrinsics.size()>=static_cast<std::size_t>(window_size_); const bool yaw_ok=std::min(yaw1,yaw2)>=min_yaw_excitation_deg_; const bool stable=full&&yaw_ok&&st1.translation_std<=convergence_translation_std_&&st2.translation_std<=convergence_translation_std_&&st1.rotation_std_deg<=convergence_rotation_std_deg_&&st2.rotation_std_deg<=convergence_rotation_std_deg_;
+    if(stable)++stable_reports_;else stable_reports_=0; converged_=stable_reports_>=convergence_stable_reports_; writeYaml(e1,e2,rel,st1,st2,yaw1,yaw2);
     publishCloud(lidar_[0].latest_gimbal_cloud,lidar_[0].latest_stamp,pub_cloud_[0]); publishCloud(lidar_[1].latest_gimbal_cloud,lidar_[1].latest_stamp,pub_cloud_[1]); if(!lidar_[0].latest_gimbal_cloud->empty()&&!lidar_[1].latest_gimbal_cloud->empty()){auto fused=std::make_shared<Cloud>();*fused=*lidar_[0].latest_gimbal_cloud;*fused+=*lidar_[1].latest_gimbal_cloud;publishCloud(fused,get_clock()->now(),pub_fused_);}
     auto map=std::make_shared<Cloud>(); *map=*lidar_[0].map; Cloud m2; pcl::transformPointCloud(*lidar_[1].map,m2,lidar_[1].initial_world.matrix().cast<float>()); *map+=m2; publishCloud(map,get_clock()->now(),pub_map_);
-    RCLCPP_INFO_THROTTLE(get_logger(),*get_clock(),5000,"samples=%zu/%zu T_lidar1_lidar2=[%.3f %.3f %.3f] fitness=see %s",lidar_[0].extrinsics.size(),lidar_[1].extrinsics.size(),rel.translation().x(),rel.translation().y(),rel.translation().z(),output_file_.c_str());
+    RCLCPP_INFO(get_logger(),"[%s] samples=%zu/%zu yaw=%.1f/%.1f deg t_std=%.4f/%.4f m r_std=%.3f/%.3f deg stable=%d/%d",converged_?"CONVERGED":"CALIBRATING",lidar_[0].extrinsics.size(),lidar_[1].extrinsics.size(),yaw1,yaw2,st1.translation_std,st2.translation_std,st1.rotation_std_deg,st2.rotation_std_deg,stable_reports_,convergence_stable_reports_);
   }
   static void writeMatrix(std::ofstream &o,const char *name,const Iso &t) { o<<name<<":\n"; for(int r=0;r<4;++r){o<<"  [";for(int c=0;c<4;++c)o<<t.matrix()(r,c)<<(c==3?"]\n":", ");} }
-  void writeYaml(const Iso &e1,const Iso &e2,const Iso &rel) const { std::ofstream o(output_file_); if(!o)return; o<<std::setprecision(12)<<"# gimbal frame = frame at startup; common yaw motion is removed\n"; writeMatrix(o,"T_gimbal_lidar1",e1); writeMatrix(o,"T_gimbal_lidar2",e2); writeMatrix(o,"T_lidar1_lidar2",rel); o<<"# p_lidar1 = T_lidar1_lidar2 * p_lidar2\n"; }
+  void writeYaml(const Iso &e1,const Iso &e2,const Iso &rel,const ConvergenceStats &s1,const ConvergenceStats &s2,double yaw1,double yaw2) const { std::ofstream o(output_file_); if(!o)return; o<<std::setprecision(12)<<"# gimbal frame = frame at startup; common yaw motion is removed\nconverged: "<<(converged_?"true":"false")<<"\nstable_reports: "<<stable_reports_<<"\nyaw_excitation_deg: ["<<yaw1<<", "<<yaw2<<"]\ntranslation_std_m: ["<<s1.translation_std<<", "<<s2.translation_std<<"]\nrotation_std_deg: ["<<s1.rotation_std_deg<<", "<<s2.rotation_std_deg<<"]\nfitness_mean: ["<<s1.fitness_mean<<", "<<s2.fitness_mean<<"]\n"; writeMatrix(o,"T_gimbal_lidar1",e1); writeMatrix(o,"T_gimbal_lidar2",e2); writeMatrix(o,"T_lidar1_lidar2",rel); o<<"# p_lidar1 = T_lidar1_lidar2 * p_lidar2\n"; }
 
-  std::string cloud_topic_[2],imu_topic_[2],output_file_; double startup_seconds_,sync_tolerance_,voxel_leaf_,max_correspondence_,max_fitness_; int min_points_,window_size_,max_map_points_; bool calibration_started_=false,initialized_=false; rclcpp::Time start_stamp_{0,0,RCL_ROS_TIME}; LidarState lidar_[2]; mutable std::mutex mutex_; rclcpp::Subscription<Msg>::SharedPtr cloud_sub_[2]; rclcpp::Subscription<Imu>::SharedPtr imu_sub_[2]; rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_[2],pub_fused_,pub_map_; rclcpp::TimerBase::SharedPtr timer_;
+  std::string cloud_topic_[2],imu_topic_[2],output_file_; double startup_seconds_,sync_tolerance_,voxel_leaf_,max_correspondence_,max_fitness_,min_yaw_excitation_deg_,convergence_translation_std_,convergence_rotation_std_deg_; int min_points_,window_size_,max_map_points_,convergence_stable_reports_,stable_reports_=0; bool calibration_started_=false,initialized_=false,converged_=false; rclcpp::Time start_stamp_{0,0,RCL_ROS_TIME}; LidarState lidar_[2]; mutable std::mutex mutex_; rclcpp::Subscription<Msg>::SharedPtr cloud_sub_[2]; rclcpp::Subscription<Imu>::SharedPtr imu_sub_[2]; rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_[2],pub_fused_,pub_map_; rclcpp::TimerBase::SharedPtr timer_;
 };
 
 int main(int argc,char **argv){rclcpp::init(argc,argv);rclcpp::spin(std::make_shared<RotateCali>());rclcpp::shutdown();return 0;}

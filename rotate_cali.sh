@@ -32,6 +32,27 @@ source "${LIVOX_WS}/install/setup.bash"
 source "${CALI_WS}/install/setup.bash"
 set -u
 
+# Livox 驱动通过 class_loader 在运行时加载 SDK，必须把 SDK 动态库目录加入
+# LD_LIBRARY_PATH；仅 source ROS 工作空间并不会自动设置这个路径。
+SDK_DIRS=(
+  "/usr/local/lib"
+  "${REPO_ROOT}/Livox-SDK2/build/sdk_core"
+  "${REPO_ROOT}/slam_source/livox_ws/src/livox_ros_driver2/.livox_sdk/lib"
+)
+SDK_FOUND=""
+for dir in "${SDK_DIRS[@]}"; do
+  if [[ -f "${dir}/liblivox_lidar_sdk_shared.so" ]]; then
+    SDK_FOUND="${dir}"
+    break
+  fi
+done
+if [[ -z "${SDK_FOUND}" ]]; then
+  echo "[rotate_cali] liblivox_lidar_sdk_shared.so not found." >&2
+  echo "             Install/build Livox-SDK2, or place the .so in /usr/local/lib." >&2
+  exit 1
+fi
+export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"
+
 # MID360_config_2.json 中的设备：192.168.1.5 与 192.168.1.3。
 # msg_MID360_launch.py 已配置 multi_topic=1，因此话题后缀为下划线形式的 IP。
 LIDAR1_TOPIC="${LIDAR1_TOPIC:-livox/lidar_192_168_1_5}"

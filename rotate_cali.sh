@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 双 MID360 云台标定启动脚本。
 # 脚本可以从任意当前目录执行：bash sentry_test_py/rotate_cali.sh
-set -Eeuo pipefail
+set -Ee -o pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -24,9 +24,13 @@ if [[ ! -f "${CALI_WS}/install/setup.bash" ]]; then
   exit 1
 fi
 
+# ROS/colcon setup 脚本会读取若干可能尚未定义的变量（例如
+# AMENT_TRACE_SETUP_FILES），因此 source 时暂时关闭 nounset；环境加载后再恢复。
+set +u
 source "${ROS_SETUP}"
 source "${LIVOX_WS}/install/setup.bash"
 source "${CALI_WS}/install/setup.bash"
+set -u
 
 # MID360_config_2.json 中的设备：192.168.1.5 与 192.168.1.3。
 # msg_MID360_launch.py 已配置 multi_topic=1，因此话题后缀为下划线形式的 IP。

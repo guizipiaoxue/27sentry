@@ -34,4 +34,10 @@ add_definitions(${PCL_DEFINITIONS})
 target_link_libraries(rotate_cali Eigen3::Eigen ${PCL_LIBRARIES})
 install(TARGETS rotate_cali DESTINATION lib/${PROJECT_NAME})
 
+add_executable(pcl_publish src/pcl_publish.cpp)
+ament_target_dependencies(pcl_publish rclcpp sensor_msgs pcl_conversions pcl_ros livox_ros_driver2)
+target_include_directories(pcl_publish PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(pcl_publish Eigen3::Eigen ${PCL_LIBRARIES})
+install(TARGETS pcl_publish DESTINATION lib/${PROJECT_NAME})
+
 ament_package()

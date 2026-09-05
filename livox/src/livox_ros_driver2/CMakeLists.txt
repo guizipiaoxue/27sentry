@@ -245,13 +245,32 @@ else(ROS_EDITION STREQUAL "ROS2")
     LIBRARY_NAME ${PROJECT_NAME}
   )
 
-  ## make sure the livox_lidar_sdk_shared library is installed
-  find_library(LIVOX_LIDAR_SDK_LIBRARY liblivox_lidar_sdk_shared.so /usr/local/lib REQUIRED)
-
-  ##
+  # Livox SDK is a separately released dependency and is not contained in this
+  # repository.  Set LIVOX_SDK_ROOT (or CMake -DLIVOX_SDK_ROOT=...) when it is
+  # installed outside the default system prefixes.
+  set(LIVOX_SDK_ROOT "$ENV{LIVOX_SDK_ROOT}" CACHE PATH
+      "Root directory of the Livox LiDAR SDK")
+  set(_LIVOX_SDK_HINTS
+      "${LIVOX_SDK_ROOT}"
+      "${LIVOX_SDK_ROOT}/lib"
+      "${LIVOX_SDK_ROOT}/include"
+      /usr/local
+      /usr)
+  find_library(LIVOX_LIDAR_SDK_LIBRARY
+      NAMES livox_lidar_sdk_shared
+      HINTS ${_LIVOX_SDK_HINTS}
+      PATH_SUFFIXES lib lib64)
   find_path(LIVOX_LIDAR_SDK_INCLUDE_DIR
-    NAMES "livox_lidar_api.h" "livox_lidar_def.h"
-    REQUIRED)
+      NAMES livox_lidar_api.h livox_lidar_def.h
+      HINTS ${_LIVOX_SDK_HINTS}
+      PATH_SUFFIXES include)
+  if(NOT LIVOX_LIDAR_SDK_LIBRARY OR NOT LIVOX_LIDAR_SDK_INCLUDE_DIR)
+    message(FATAL_ERROR
+      "Livox SDK not found. Install liblivox_lidar_sdk_shared.so and its headers, "
+      "then set LIVOX_SDK_ROOT=/path/to/livox-sdk (or use /usr/local).")
+  endif()
+  message(STATUS "Livox SDK library: ${LIVOX_LIDAR_SDK_LIBRARY}")
+  message(STATUS "Livox SDK headers: ${LIVOX_LIDAR_SDK_INCLUDE_DIR}")
 
   ## PCL library
   link_directories(${PCL_LIBRARY_DIRS})

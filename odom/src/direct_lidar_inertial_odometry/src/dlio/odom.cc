@@ -505,6 +505,14 @@ void dlio::OdomNode::getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedP
   this->crop.setInputCloud(original_scan_);
   this->crop.filter(*original_scan_);
 
+  if (original_scan_->points.empty()) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "Dropping empty LiDAR scan after filtering");
+    this->original_scan = original_scan_;
+    this->deskew_ = false;
+    return;
+  }
+
   // automatically detect sensor type
   this->sensor = dlio::SensorType::UNKNOWN;
   for (auto &field : pc->fields) {
@@ -640,7 +648,7 @@ void dlio::OdomNode::deskewPointcloud() {
                         boost::range::index_value<PointType&, long> p2)
       { return p1.value().timestamp != p2.value().timestamp; };
     extract_point_time = [&sweep_ref_time](boost::range::index_value<PointType&, long> pt)
-      { return pt.value().timestamp * 1e-9f; };
+      { return pt.value().timestamp * 1e-9; };
   }
 
   // copy points into deskewed_scan_ in order of timestamp
@@ -861,6 +869,9 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
   this->first_imu_received = true;
 
   sensor_msgs::msg::Imu::SharedPtr imu = this->transformImu( imu_raw );
+  if (!imu) {
+    return;
+  }
   this->imu_stamp = imu->header.stamp;
   double imu_stamp_secs = rclcpp::Time(imu->header.stamp).seconds();
 
@@ -970,8 +981,23 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
 
   } else {
 
-    double dt = imu_stamp_secs - this->prev_imu_stamp;
-    if (dt == 0) { dt = 1.0/200.0; }
+    // The first post-calibration sample establishes the IMU time base.  There
+    // is no preceding measurement from which a physical dt can be computed.
+    const bool first_imu_sample = (this->prev_imu_stamp == 0.0);
+    double dt = first_imu_sample ? (1.0 / 200.0) :
+                                   (imu_stamp_secs - this->prev_imu_stamp);
+    if (!first_imu_sample && dt <= 0.0) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "Skipping IMU sample with invalid dt: %.6f", dt);
+      return;
+    }
+    if (dt > 0.1) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "IMU timestamp gap %.6f s; using nominal dt", dt);
+      // Do not integrate across a scheduling/transport gap.  The timestamp
+      // is still accepted and becomes the new baseline for the next sample.
+      dt = 1.0 / 200.0;
+    }
     this->imu_rates.push_back( 1./dt );
 
     // Apply the calibrated bias to the new IMU measurements
@@ -1372,8 +1398,15 @@ sensor_msgs::msg::Imu::SharedPtr dlio::OdomNode::transformImu(const sensor_msgs:
   imu->header = imu_raw->header;
 
   double imu_stamp_secs = rclcpp::Time(imu->header.stamp).seconds();
-  static double prev_stamp = imu_stamp_secs;
-  double dt = imu_stamp_secs - prev_stamp;
+  static double prev_stamp = 0.0;
+  if (imu_stamp_secs <= 0.0 || (prev_stamp > 0.0 && imu_stamp_secs <= prev_stamp)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "Dropping invalid or non-monotonic IMU timestamp");
+    return nullptr;
+  }
+  // Use the nominal sensor period for the first sample; this dt is only used
+  // for the lever-arm acceleration transform and must never be epoch-sized.
+  double dt = (prev_stamp == 0.0) ? (1.0 / 200.0) : (imu_stamp_secs - prev_stamp);
   prev_stamp = imu_stamp_secs;
   
   if (dt == 0) { dt = 1.0/200.0; }
@@ -1422,7 +1455,7 @@ void dlio::OdomNode::computeSpaciousness() {
   // compute range of points
   std::vector<float> ds;
 
-  for (int i = 0; i <= this->original_scan->points.size(); i++) {
+  for (size_t i = 0; i < this->original_scan->points.size(); ++i) {
     float d = std::sqrt(pow(this->original_scan->points[i].x, 2) +
                         pow(this->original_scan->points[i].y, 2));
     ds.push_back(d);

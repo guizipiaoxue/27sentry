@@ -77,11 +77,13 @@ class RotateCali final : public rclcpp::Node {
     imu_topic_[0] = declare_parameter<std::string>("imu1_topic", "livox/imu_192_168_1_5");
     imu_topic_[1] = declare_parameter<std::string>("imu2_topic", "livox/imu_192_168_1_3");
     output_file_ = declare_parameter<std::string>("output_file", "lidar_calibration.yaml");
-    startup_seconds_ = declare_parameter<double>("startup_seconds", 1.0);
+    startup_seconds_ = declare_parameter<double>("startup_seconds", 5.0);
     sync_tolerance_ = declare_parameter<double>("sync_tolerance", 0.03);
     voxel_leaf_ = declare_parameter<double>("voxel_leaf", 0.08);
     max_correspondence_ = declare_parameter<double>("max_correspondence", 1.0);
     max_fitness_ = declare_parameter<double>("max_fitness", 0.25);
+    max_translation_jump_ = declare_parameter<double>("max_translation_jump", 0.15);
+    max_rotation_jump_deg_ = declare_parameter<double>("max_rotation_jump_deg", 20.0);
     min_points_ = declare_parameter<int>("min_points", 150);
     window_size_ = declare_parameter<int>("window_size", 40);
     max_map_points_ = declare_parameter<int>("max_map_points", 200000);
@@ -103,14 +105,26 @@ class RotateCali final : public rclcpp::Node {
   }
 
  private:
-  static Cloud::Ptr toCloud(const Msg &msg) {
+  static Cloud::Ptr toCloud(const Msg &msg, const Eigen::Quaterniond &scan_rotation) {
     auto cloud = std::make_shared<Cloud>();
     cloud->reserve(msg.points.size());
+    uint32_t max_offset = 0;
+    for (const auto &p : msg.points) max_offset = std::max(max_offset, p.offset_time);
     for (const auto &p : msg.points) {
       const bool valid = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
       const double range_sq = p.x * p.x + p.y * p.y + p.z * p.z;
       if (valid && range_sq > 1e-6) {
-        cloud->push_back({p.x, p.y, p.z});
+        Eigen::Vector3d v(p.x, p.y, p.z);
+        // Approximate scan de-skew: offset_time is in nanoseconds.  Rotate
+        // each point back to the scan reference using the measured frame
+        // rotation.  This is intentionally conservative: translation is not
+        // synthesized because the calibration motion is predominantly yaw.
+        if (max_offset > 0 && scan_rotation.angularDistance(Eigen::Quaterniond::Identity()) > 1e-9) {
+          const double u = static_cast<double>(p.offset_time) / max_offset;
+          const Eigen::Quaterniond qi = Eigen::Quaterniond::Identity().slerp(u, scan_rotation);
+          v = qi.conjugate() * v;
+        }
+        cloud->push_back({static_cast<float>(v.x()), static_cast<float>(v.y()), static_cast<float>(v.z())});
       }
     }
     cloud->width = static_cast<std::uint32_t>(cloud->size());
@@ -187,12 +201,15 @@ class RotateCali final : public rclcpp::Node {
   }
 
   void cloudCallback(int id, Msg::ConstSharedPtr msg) {
-    auto cloud = toCloud(*msg);
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto &state = lidar_[id];
+    const Eigen::Quaterniond scan_rotation =
+        state.used_imu_rotation.inverse() * state.imu_rotation;
+    auto cloud = toCloud(*msg, scan_rotation);
     if (cloud->size() < static_cast<std::size_t>(min_points_)) {
       return;
     }
     const rclcpp::Time stamp(msg->header.stamp);
-    std::lock_guard<std::mutex> lock(mutex_);
     if (!calibration_started_) {
       calibration_started_ = true;
       start_stamp_ = stamp;
@@ -314,6 +331,17 @@ class RotateCali final : public rclcpp::Node {
     if (!registerCloud(s.map, cloud, guess, local_pose, fitness)) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000,
                            "lidar%d GICP rejected (fitness %.4f)", id + 1, fitness);
+      return;
+    }
+    // Loose continuity gate: reject only clear GICP jumps while preserving
+    // normal frame-to-frame motion during manual gimbal rotation.
+    const Iso delta_pose = s.pose_local.inverse() * local_pose;
+    const double jump_t = delta_pose.translation().norm();
+    const double jump_r = Eigen::AngleAxisd(delta_pose.rotation()).angle() * 180.0 / M_PI;
+    if (s.map_updates > 0 && (jump_t > max_translation_jump_ || jump_r > max_rotation_jump_deg_)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000,
+                           "lidar%d GICP jump rejected: dt=%.3f m dr=%.2f deg",
+                           id + 1, jump_t, jump_r);
       return;
     }
     s.pose_local = local_pose;
@@ -621,6 +649,8 @@ class RotateCali final : public rclcpp::Node {
   double voxel_leaf_;
   double max_correspondence_;
   double max_fitness_;
+  double max_translation_jump_;
+  double max_rotation_jump_deg_;
   double min_yaw_excitation_deg_;
   double convergence_translation_std_;
   double convergence_rotation_std_deg_;
@@ -630,6 +660,7 @@ class RotateCali final : public rclcpp::Node {
   int max_map_points_;
   int convergence_stable_reports_;
   int stable_reports_ = 0;
+
 
   bool calibration_started_ = false;
   bool initialized_ = false;

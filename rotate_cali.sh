@@ -18,6 +18,7 @@ fi
 
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 LIVOX_CONFIG="${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json"
+LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
 POINT_TOPIC="${POINT_TOPIC:-livox/lidar_192_168_1_3}"
 IMU_TOPIC="${IMU_TOPIC:-livox/imu_192_168_1_3}"
 POSE_TOPIC="${POSE_TOPIC:-pose}"
@@ -54,11 +55,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-setsid ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
-  -p xfer_format:=0 -p multi_topic:=1 -p data_src:=0 \
-  -p publish_freq:=10.0 -p output_data_type:=0 \
-  -p frame_id:=livox_frame -p user_config_path:="${LIVOX_CONFIG}" \
-  -p cmdline_input_bd_code:=livox0000000001 &
+DRIVER_ARGS=(
+  ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args
+  -p xfer_format:=0 -p multi_topic:=1 -p data_src:=0
+  -p publish_freq:=10.0 -p output_data_type:=0
+  -p frame_id:=livox_frame -p user_config_path:="${LIVOX_CONFIG}"
+)
+if [[ -n "${LIVOX_BROADCAST_CODE}" ]]; then
+  DRIVER_ARGS+=( -p cmdline_input_bd_code:="${LIVOX_BROADCAST_CODE}" )
+fi
+setsid "${DRIVER_ARGS[@]}" \
+  &
 DRIVER_PID=$!
 sleep "${DRIVER_STARTUP_WAIT:-2}"
 

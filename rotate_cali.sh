@@ -19,8 +19,8 @@ fi
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 LIVOX_CONFIG="${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json"
 LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
-POINT_TOPIC="${POINT_TOPIC:-livox/lidar_192_168_1_3}"
-IMU_TOPIC="${IMU_TOPIC:-livox/imu_192_168_1_3}"
+POINT_TOPIC="${POINT_TOPIC:-livox/lidar_192_168_1_5}"
+IMU_TOPIC="${IMU_TOPIC:-livox/imu_192_168_1_5}"
 POSE_TOPIC="${POSE_TOPIC:-pose}"
 OUTPUT_FILE="${OUTPUT_FILE:-${ROOT_DIR}/slam/gimbal_lidar.yaml}"
 # Circle fitting / motion-continuity filters.  Keep these configurable from the

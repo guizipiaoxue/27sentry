@@ -22,6 +22,15 @@ POINT_TOPIC="${POINT_TOPIC:-livox/lidar_192_168_1_3}"
 IMU_TOPIC="${IMU_TOPIC:-livox/imu_192_168_1_3}"
 POSE_TOPIC="${POSE_TOPIC:-pose}"
 OUTPUT_FILE="${OUTPUT_FILE:-${ROOT_DIR}/slam/gimbal_lidar.yaml}"
+# Circle fitting / motion-continuity filters.  Keep these configurable from the
+# shell because the appropriate limits depend on the platform's motion speed.
+MIN_SAMPLES="${MIN_SAMPLES:-100}"
+MAX_POSITION_JUMP="${MAX_POSITION_JUMP:-0.50}"
+MAX_ANGULAR_JUMP="${MAX_ANGULAR_JUMP:-0.35}"
+MAX_LINEAR_SPEED="${MAX_LINEAR_SPEED:-5.0}"
+MAX_ANGULAR_SPEED="${MAX_ANGULAR_SPEED:-6.0}"
+RESIDUAL_THRESHOLD="${RESIDUAL_THRESHOLD:-0.05}"
+FIT_WINDOW="${FIT_WINDOW:-2000}"
 
 DRIVER_PID=""; ODOM_PID=""; CALI_PID=""
 cleanup() {
@@ -62,6 +71,14 @@ ODOM_PID=$!
 sleep "${ODOM_STARTUP_WAIT:-3}"
 
 setsid ros2 run cali_ws circle_cali_dlio --ros-args \
-  -p pose_topic:="${POSE_TOPIC}" -p output_file:="${OUTPUT_FILE}" &
+  -p pose_topic:="${POSE_TOPIC}" \
+  -p output_file:="${OUTPUT_FILE}" \
+  -p min_samples:="${MIN_SAMPLES}" \
+  -p max_position_jump:="${MAX_POSITION_JUMP}" \
+  -p max_angular_jump:="${MAX_ANGULAR_JUMP}" \
+  -p max_linear_speed:="${MAX_LINEAR_SPEED}" \
+  -p max_angular_speed:="${MAX_ANGULAR_SPEED}" \
+  -p residual_threshold:="${RESIDUAL_THRESHOLD}" \
+  -p fit_window:="${FIT_WINDOW}" &
 CALI_PID=$!
 wait "${CALI_PID}"

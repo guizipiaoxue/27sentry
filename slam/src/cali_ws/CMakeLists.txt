@@ -37,6 +37,8 @@ install(TARGETS rotate_cali DESTINATION lib/${PROJECT_NAME})
 
 add_executable(circle_cali_dlio src/circle_cali_dlio.cpp)
 ament_target_dependencies(circle_cali_dlio rclcpp geometry_msgs)
+target_link_libraries(circle_cali_dlio Eigen3::Eigen)
+target_include_directories(circle_cali_dlio PRIVATE ${EIGEN3_INCLUDE_DIRS})
 install(TARGETS circle_cali_dlio DESTINATION lib/${PROJECT_NAME})
 
 add_executable(pcl_publish src/pcl_publish.cpp)

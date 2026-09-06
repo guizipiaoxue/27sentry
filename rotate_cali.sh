@@ -10,6 +10,12 @@ source "${ROOT_DIR}/livox/install/setup.bash"
 [[ -f "${ROOT_DIR}/slam/install/setup.bash" ]] && source "${ROOT_DIR}/slam/install/setup.bash"
 set -u
 
+if ! ros2 pkg prefix cali_ws >/dev/null 2>&1 || [[ ! -e "${ROOT_DIR}/slam/install/cali_ws/lib/cali_ws/circle_cali_dlio" ]]; then
+  echo "[rotate_cali] circle_cali_dlio is not built. Build it first:" >&2
+  echo "  cd ${ROOT_DIR}/slam && source /opt/ros/humble/setup.bash && colcon build --packages-select cali_ws --symlink-install" >&2
+  exit 1
+fi
+
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 LIVOX_CONFIG="${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json"
 POINT_TOPIC="${POINT_TOPIC:-livox/lidar_192_168_1_3}"

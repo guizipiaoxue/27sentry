@@ -4,12 +4,15 @@
 #include <cstdint>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <vector>
 
+#include <Eigen/Geometry>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/PointIndices.h>
 #include <pcl/point_cloud.h>
@@ -25,6 +28,7 @@ class GroundZCalibration final : public rclcpp::Node {
   using Msg = livox_ros_driver2::msg::CustomMsg;
   using Point = pcl::PointXYZ;
   using Cloud = pcl::PointCloud<Point>;
+  using Transform = Eigen::Isometry3d;
 
   GroundZCalibration() : Node("use_ground_cali") {
     topics_[0] = declare_parameter<std::string>(
@@ -33,6 +37,10 @@ class GroundZCalibration final : public rclcpp::Node {
         "lidar2_topic", "livox/lidar_192_168_1_3");
     output_file_ = declare_parameter<std::string>(
         "output_file", "ground_z_calibration.yaml");
+    lidar3_calibration_file_ = declare_parameter<std::string>(
+        "lidar3_calibration_file", "slam/config/gimbal_lidar_3.yaml");
+    lidar5_calibration_file_ = declare_parameter<std::string>(
+        "lidar5_calibration_file", "slam/config/gimbal_lidar_5.yaml");
     min_points_ = declare_parameter<int>("min_points", 80);
     min_samples_ = declare_parameter<int>("min_samples", 20);
     max_samples_ = declare_parameter<int>("max_samples", 100);
@@ -41,8 +49,21 @@ class GroundZCalibration final : public rclcpp::Node {
     min_range_ = declare_parameter<double>("min_range", 0.5);
     max_range_ = declare_parameter<double>("max_range", 30.0);
     z_min_ = declare_parameter<double>("z_min", -5.0);
-    z_max_ = declare_parameter<double>("z_max", 5.0);
+    z_max_ = declare_parameter<double>("z_max", 0.0);
+    ground_z_margin_ = declare_parameter<double>("ground_z_margin", 0.02);
+    ground_must_be_negative_ = declare_parameter<bool>("ground_must_be_negative", true);
     sync_tolerance_ = declare_parameter<double>("sync_tolerance", 0.10);
+
+    lidar3_transform_loaded_ = loadLidarToGimbal(
+        lidar3_calibration_file_, lidar3_to_gimbal_);
+    lidar5_transform_loaded_ = loadLidarToGimbal(
+        lidar5_calibration_file_, lidar5_to_gimbal_);
+    if (!lidar3_transform_loaded_ || !lidar5_transform_loaded_) {
+      RCLCPP_WARN(
+          get_logger(),
+          "existing gimbal calibration YAML not fully loaded; ground heights "
+          "will still be saved, but transform matrices will be omitted");
+    }
 
     auto qos = rclcpp::SensorDataQoS();
     subscriptions_[0] = create_subscription<Msg>(
@@ -68,6 +89,67 @@ class GroundZCalibration final : public rclcpp::Node {
     std::size_t inliers = 0;
   };
 
+  static std::vector<double> numbersInLine(const std::string &line) {
+    static const std::regex number_pattern(
+        R"([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)");
+    std::vector<double> values;
+    for (std::sregex_iterator it(line.begin(), line.end(), number_pattern), end;
+         it != end; ++it) {
+      values.push_back(std::stod(it->str()));
+    }
+    return values;
+  }
+
+  static bool loadLidarToGimbal(
+      const std::string &file_name, Transform &transform) {
+    std::ifstream input(file_name);
+    if (!input) {
+      return false;
+    }
+    Eigen::Matrix3d rotation = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+    int section = 0;
+    std::vector<double> rotation_values;
+    std::vector<double> translation_values;
+    std::string line;
+    while (std::getline(input, line)) {
+      if (line.find("lidar_to_gimbal_rotation:") != std::string::npos) {
+        section = 1;
+        rotation_values.clear();
+        continue;
+      }
+      if (line.find("lidar_to_gimbal_translation:") != std::string::npos) {
+        section = 2;
+        translation_values.clear();
+        continue;
+      }
+      const std::vector<double> values = numbersInLine(line);
+      if (section == 1 && rotation_values.size() < 9) {
+        rotation_values.insert(rotation_values.end(), values.begin(), values.end());
+      } else if (section == 2 && translation_values.size() < 3) {
+        translation_values.insert(translation_values.end(), values.begin(), values.end());
+      }
+    }
+    if (rotation_values.size() < 9 || translation_values.size() < 3) {
+      return false;
+    }
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        rotation(row, col) =
+            rotation_values[static_cast<std::size_t>(row * 3 + col)];
+      }
+      translation(row) = translation_values[static_cast<std::size_t>(row)];
+    }
+    if (!rotation.allFinite() || !translation.allFinite() ||
+        std::abs(rotation.determinant()) < 1e-6) {
+      return false;
+    }
+    transform = Transform::Identity();
+    transform.linear() = rotation;
+    transform.translation() = translation;
+    return true;
+  }
+
   static Cloud::Ptr toCloud(const Msg &msg) {
     auto cloud = std::make_shared<Cloud>();
     cloud->reserve(msg.points.size());
@@ -90,7 +172,8 @@ class GroundZCalibration final : public rclcpp::Node {
       const double range_sq = static_cast<double>(p.x) * p.x +
                               static_cast<double>(p.y) * p.y;
       if (range_sq >= min_range_sq && range_sq <= max_range_sq &&
-          p.z >= z_min_ && p.z <= z_max_) {
+          p.z >= z_min_ && p.z <= z_max_ &&
+          (!ground_must_be_negative_ || p.z < -ground_z_margin_)) {
         candidates->push_back(p);
       }
     }
@@ -124,6 +207,9 @@ class GroundZCalibration final : public rclcpp::Node {
     result.valid = true;
     result.height = -d / c;
     result.inliers = inliers.indices.size();
+    if (ground_must_be_negative_ && result.height >= -ground_z_margin_) {
+      return {};
+    }
     return result;
   }
 
@@ -196,19 +282,78 @@ class GroundZCalibration final : public rclcpp::Node {
       RCLCPP_WARN(get_logger(), "cannot write calibration file: %s", output_file_.c_str());
       return;
     }
-    output << "# Ground based z calibration (meters)\n"
+    output << std::setprecision(12)
+           << "# Ground based z calibration (meters)\n"
            << "lidar1_ground_height: " << latest_ground_[0] << "\n"
            << "lidar2_ground_height: " << latest_ground_[1] << "\n"
-           << "z_offset_lidar2_to_lidar1: " << z_offset_ << "\n";
+           << "# lidar1=lidar5, lidar2=lidar3; ground is expected on negative lidar Z\n"
+           << "lidar5_ground_height: " << latest_ground_[0] << "\n"
+           << "lidar3_ground_height: " << latest_ground_[1] << "\n"
+           << "gimbal_height_above_ground: " << -latest_ground_[1] << "\n"
+           << "z_offset_lidar3_to_lidar5: " << z_offset_ << "\n"
+           << "z_translation_lidar5_to_lidar3: "
+           << (latest_ground_[1] - latest_ground_[0]) << "\n";
+    if (lidar3_transform_loaded_ && lidar5_transform_loaded_) {
+      writeGroundAlignedTransforms(output);
+    }
     saved_ = true;
-    RCLCPP_INFO(get_logger(), "z calibration saved: lidar2 += %.6f m -> %s",
+    RCLCPP_INFO(get_logger(), "z calibration saved: lidar3 += %.6f m to lidar5 -> %s",
                 z_offset_, output_file_.c_str());
+    if (lidar3_transform_loaded_ && lidar5_transform_loaded_) {
+      RCLCPP_INFO(
+          get_logger(),
+          "ground-aligned transforms saved: T_gimbal_lidar3, "
+          "T_gimbal_lidar5, T_lidar3_lidar5, T_lidar5_lidar3");
+    }
+  }
+
+  static void writeMatrix(
+      std::ofstream &output, const char *name, const Transform &transform) {
+    output << name << ":\n";
+    for (int row = 0; row < 4; ++row) {
+      output << "  [";
+      for (int col = 0; col < 4; ++col) {
+        output << transform.matrix()(row, col)
+               << (col == 3 ? "]\n" : ", ");
+      }
+    }
+  }
+
+  void writeGroundAlignedTransforms(std::ofstream &output) const {
+    // The gimbal Z origin is defined at lidar3 height. The measured ground
+    // heights then determine the lidar5-to-lidar3 vertical translation.
+    Transform lidar3_to_gimbal = lidar3_to_gimbal_;
+    Transform lidar5_to_gimbal = lidar5_to_gimbal_;
+    lidar3_to_gimbal.translation().z() = 0.0;
+    lidar5_to_gimbal.translation().z() =
+        latest_ground_[1] - latest_ground_[0];
+    const Transform lidar5_to_lidar3 =
+        lidar3_to_gimbal.inverse() * lidar5_to_gimbal;
+    const Transform lidar3_to_lidar5 =
+        lidar5_to_gimbal.inverse() * lidar3_to_gimbal;
+
+    output << std::setprecision(12)
+           << "# Compatibility aliases for pcl_publish: lidar1=lidar5, lidar2=lidar3.\n";
+    writeMatrix(output, "T_gimbal_lidar1", lidar5_to_gimbal);
+    writeMatrix(output, "T_gimbal_lidar2", lidar3_to_gimbal);
+    writeMatrix(output, "T_lidar1_lidar2", lidar3_to_lidar5);
+    output << "# Explicit lidar-number names and both relative directions.\n"
+           << "# Matrices map a point from the frame in the name suffix "
+              "to the frame in the name prefix.\n"
+           << "# p_gimbal = T_gimbal_lidar3 * p_lidar3\n"
+           << "# p_gimbal = T_gimbal_lidar5 * p_lidar5\n"
+           << "# p_lidar3 = T_lidar3_lidar5 * p_lidar5\n"
+           << "# p_lidar5 = T_lidar5_lidar3 * p_lidar3\n";
+    writeMatrix(output, "T_gimbal_lidar3", lidar3_to_gimbal);
+    writeMatrix(output, "T_gimbal_lidar5", lidar5_to_gimbal);
+    writeMatrix(output, "T_lidar3_lidar5", lidar5_to_lidar3);
+    writeMatrix(output, "T_lidar5_lidar3", lidar3_to_lidar5);
   }
 
   void report() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (latest_ground_[0] == latest_ground_[0] && latest_ground_[1] == latest_ground_[1]) {
-      RCLCPP_INFO(get_logger(), "ground heights: lidar1=%.4f m (%zu), lidar2=%.4f m (%zu), samples=%zu, z_offset=%.4f m%s",
+      RCLCPP_INFO(get_logger(), "ground heights: lidar5=%.4f m (%zu), lidar3=%.4f m (%zu), samples=%zu, lidar3_to_lidar5_z_offset=%.4f m%s",
                   latest_ground_[0], latest_inliers_[0], latest_ground_[1], latest_inliers_[1],
                   ground_differences_.size(), z_offset_, calibrated_ ? " [calibrated]" : "");
     } else {
@@ -219,6 +364,8 @@ class GroundZCalibration final : public rclcpp::Node {
 
   std::string topics_[2];
   std::string output_file_;
+  std::string lidar3_calibration_file_;
+  std::string lidar5_calibration_file_;
   int min_points_ = 80;
   int min_samples_ = 20;
   int max_samples_ = 100;
@@ -227,8 +374,10 @@ class GroundZCalibration final : public rclcpp::Node {
   double min_range_ = 0.5;
   double max_range_ = 30.0;
   double z_min_ = -5.0;
-  double z_max_ = 5.0;
+  double z_max_ = 0.0;
+  double ground_z_margin_ = 0.02;
   double sync_tolerance_ = 0.10;
+  bool ground_must_be_negative_ = true;
   double latest_ground_[2] = {std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN()};
   std::size_t latest_inliers_[2] = {0, 0};
@@ -239,6 +388,10 @@ class GroundZCalibration final : public rclcpp::Node {
   double z_offset_ = 0.0;
   bool calibrated_ = false;
   bool saved_ = false;
+  bool lidar3_transform_loaded_ = false;
+  bool lidar5_transform_loaded_ = false;
+  Transform lidar3_to_gimbal_ = Transform::Identity();
+  Transform lidar5_to_gimbal_ = Transform::Identity();
   std::mutex mutex_;
   rclcpp::Subscription<Msg>::SharedPtr subscriptions_[2];
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publishers_[2];

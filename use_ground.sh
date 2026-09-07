@@ -56,6 +56,8 @@ LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID
 LIDAR1_TOPIC="${LIDAR1_TOPIC:-livox/lidar_192_168_1_5}"
 LIDAR2_TOPIC="${LIDAR2_TOPIC:-livox/lidar_192_168_1_3}"
 OUTPUT_FILE="${OUTPUT_FILE:-${ROOT_DIR}/slam/ground_z_calibration.yaml}"
+LIDAR3_CALIBRATION_FILE="${LIDAR3_CALIBRATION_FILE:-${ROOT_DIR}/slam/config/gimbal_lidar_3.yaml}"
+LIDAR5_CALIBRATION_FILE="${LIDAR5_CALIBRATION_FILE:-${ROOT_DIR}/slam/config/gimbal_lidar_5.yaml}"
 MIN_SAMPLES="${MIN_SAMPLES:-20}"
 MAX_SAMPLES="${MAX_SAMPLES:-100}"
 DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
@@ -130,6 +132,8 @@ echo "[use_ground] Output: ${OUTPUT_FILE}"
 setsid ros2 run cali_ws use_ground_cali --ros-args \
   -p lidar1_topic:="${LIDAR1_TOPIC}" \
   -p lidar2_topic:="${LIDAR2_TOPIC}" \
+  -p lidar3_calibration_file:="${LIDAR3_CALIBRATION_FILE}" \
+  -p lidar5_calibration_file:="${LIDAR5_CALIBRATION_FILE}" \
   -p output_file:="${OUTPUT_FILE}" \
   -p min_samples:="${MIN_SAMPLES}" \
   -p max_samples:="${MAX_SAMPLES}" &

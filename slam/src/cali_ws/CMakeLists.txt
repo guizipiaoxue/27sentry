@@ -51,7 +51,7 @@ add_executable(use_ground_cali src/use_ground_cali.cpp)
 ament_target_dependencies(use_ground_cali rclcpp sensor_msgs pcl_conversions pcl_ros livox_ros_driver2)
 target_include_directories(use_ground_cali PRIVATE ${PCL_INCLUDE_DIRS})
 add_definitions(${PCL_DEFINITIONS})
-target_link_libraries(use_ground_cali ${PCL_LIBRARIES})
+target_link_libraries(use_ground_cali Eigen3::Eigen ${PCL_LIBRARIES})
 install(TARGETS use_ground_cali DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

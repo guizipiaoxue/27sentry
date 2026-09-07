@@ -13,7 +13,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common filters registration)
+find_package(PCL REQUIRED COMPONENTS common filters registration segmentation)
 find_package(livox_ros_driver2 REQUIRED)
 
 if(BUILD_TESTING)
@@ -46,5 +46,12 @@ ament_target_dependencies(pcl_publish rclcpp sensor_msgs pcl_conversions pcl_ros
 target_include_directories(pcl_publish PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(pcl_publish Eigen3::Eigen ${PCL_LIBRARIES})
 install(TARGETS pcl_publish DESTINATION lib/${PROJECT_NAME})
+
+add_executable(use_ground_cali src/use_ground_cali.cpp)
+ament_target_dependencies(use_ground_cali rclcpp sensor_msgs pcl_conversions pcl_ros livox_ros_driver2)
+target_include_directories(use_ground_cali PRIVATE ${PCL_INCLUDE_DIRS})
+add_definitions(${PCL_DEFINITIONS})
+target_link_libraries(use_ground_cali ${PCL_LIBRARIES})
+install(TARGETS use_ground_cali DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

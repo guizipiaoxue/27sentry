@@ -120,22 +120,17 @@ class CircleCaliDlio final : public rclcpp::Node {
     }
     if (gravity_lidar.norm() < 1e-9) return;
     gravity_lidar.normalize();
-    const Eigen::Vector3d gimbal_down(0.0, 0.0, -1.0);
-    // Gravity determines roll/pitch only.  Remove the yaw component so the
-    // lidar's original heading is preserved in the lidar-to-gimbal rotation.
-    const Eigen::Matrix3d R_align =
-        Eigen::Quaterniond::FromTwoVectors(gravity_lidar, gimbal_down).toRotationMatrix();
-    const Eigen::Vector3d rpy = R_align.eulerAngles(2, 1, 0);  // yaw, pitch, roll
-    const double yaw_compensation = 0.0;
-    const Eigen::Matrix3d R_gravity =
-        (Eigen::AngleAxisd(yaw_compensation, Eigen::Vector3d::UnitZ()) *
-         Eigen::AngleAxisd(rpy[1], Eigen::Vector3d::UnitY()) *
-         Eigen::AngleAxisd(rpy[2], Eigen::Vector3d::UnitX())).toRotationMatrix();
-    const Eigen::Vector3d t_lidar_to_gimbal = -R_gravity * c;
-    const double roll = std::atan2(gravity_lidar.y(), gravity_lidar.z());
+    // Gravity determines roll/pitch only.  Compute them directly with a
+    // consistent branch (gravity points along gimbal -Z), and keep yaw fixed
+    // at zero so lidar 3 and lidar 5 retain the same original heading.
+    const double roll = std::atan2(gravity_lidar.y(), -gravity_lidar.z());
     const double pitch = std::atan2(-gravity_lidar.x(),
                                     std::sqrt(gravity_lidar.y() * gravity_lidar.y() +
                                               gravity_lidar.z() * gravity_lidar.z()));
+    const Eigen::Matrix3d R_gravity =
+        (Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()) *
+         Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY())).toRotationMatrix();
+    const Eigen::Vector3d t_lidar_to_gimbal = -R_gravity * c;
     std::ofstream out(output_file_);
     out << std::fixed << std::setprecision(9)
         << "circle_center: [" << c.x() << ", " << c.y() << ", " << c.z() << "]\n"

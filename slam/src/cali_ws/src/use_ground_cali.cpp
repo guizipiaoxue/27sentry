@@ -18,6 +18,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -46,13 +47,25 @@ class GroundZCalibration final : public rclcpp::Node {
     max_samples_ = declare_parameter<int>("max_samples", 100);
     ransac_distance_ = declare_parameter<double>("ransac_distance", 0.04);
     min_ground_normal_z_ = declare_parameter<double>("min_ground_normal_z", 0.85);
-    min_range_ = declare_parameter<double>("min_range", 0.5);
+    min_range_ = declare_parameter<double>("min_range", 0.3);
     max_range_ = declare_parameter<double>("max_range", 30.0);
     z_min_ = declare_parameter<double>("z_min", -5.0);
     z_max_ = declare_parameter<double>("z_max", 0.0);
     ground_z_margin_ = declare_parameter<double>("ground_z_margin", 0.02);
     ground_must_be_negative_ = declare_parameter<bool>("ground_must_be_negative", true);
     sync_tolerance_ = declare_parameter<double>("sync_tolerance", 0.10);
+    roi_x_min_ = declare_parameter<double>("roi_x_min", -30.0);
+    roi_x_max_ = declare_parameter<double>("roi_x_max", 30.0);
+    roi_y_min_ = declare_parameter<double>("roi_y_min", -10.0);
+    roi_y_max_ = declare_parameter<double>("roi_y_max", 10.0);
+    voxel_leaf_ = declare_parameter<double>("voxel_leaf", 0.03);
+    min_inlier_ratio_ = declare_parameter<double>("min_inlier_ratio", 0.20);
+    max_rmse_ = declare_parameter<double>("max_rmse", 0.025);
+    max_height_jump_ = declare_parameter<double>("max_height_jump", 0.15);
+    min_normal_cosine_ = declare_parameter<double>("min_normal_cosine", 0.985);
+    calibration_min_samples_ = declare_parameter<int>("calibration_min_samples", 50);
+    calibration_max_mad_ = declare_parameter<double>("calibration_max_mad", 0.015);
+    frame_queue_size_ = declare_parameter<int>("frame_queue_size", 30);
 
     lidar3_transform_loaded_ = loadLidarToGimbal(
         lidar3_calibration_file_, lidar3_to_gimbal_);
@@ -87,7 +100,11 @@ class GroundZCalibration final : public rclcpp::Node {
     bool valid = false;
     double height = std::numeric_limits<double>::quiet_NaN();
     std::size_t inliers = 0;
+    double inlier_ratio = 0.0;
+    double rmse = std::numeric_limits<double>::quiet_NaN();
+    Eigen::Vector3d normal = Eigen::Vector3d::UnitZ();
   };
+  struct Frame { Cloud::Ptr cloud; rclcpp::Time stamp; GroundEstimate ground; };
 
   static std::vector<double> numbersInLine(const std::string &line) {
     static const std::regex number_pattern(
@@ -172,6 +189,7 @@ class GroundZCalibration final : public rclcpp::Node {
       const double range_sq = static_cast<double>(p.x) * p.x +
                               static_cast<double>(p.y) * p.y;
       if (range_sq >= min_range_sq && range_sq <= max_range_sq &&
+          p.x >= roi_x_min_ && p.x <= roi_x_max_ && p.y >= roi_y_min_ && p.y <= roi_y_max_ &&
           p.z >= z_min_ && p.z <= z_max_ &&
           (!ground_must_be_negative_ || p.z < -ground_z_margin_)) {
         candidates->push_back(p);
@@ -179,6 +197,17 @@ class GroundZCalibration final : public rclcpp::Node {
     }
     if (candidates->size() < static_cast<std::size_t>(min_points_)) {
       return {};
+    }
+
+    if (voxel_leaf_ > 1e-4) {
+      pcl::VoxelGrid<Point> voxel;
+      voxel.setInputCloud(candidates);
+      voxel.setLeafSize(static_cast<float>(voxel_leaf_), static_cast<float>(voxel_leaf_),
+                        static_cast<float>(voxel_leaf_));
+      Cloud::Ptr filtered(new Cloud);
+      voxel.filter(*filtered);
+      candidates = filtered;
+      if (candidates->size() < static_cast<std::size_t>(min_points_)) return {};
     }
 
     pcl::SACSegmentation<Point> segmentation;
@@ -207,6 +236,18 @@ class GroundZCalibration final : public rclcpp::Node {
     result.valid = true;
     result.height = -d / c;
     result.inliers = inliers.indices.size();
+    result.inlier_ratio = static_cast<double>(result.inliers) /
+                          static_cast<double>(candidates->size());
+    double squared_error = 0.0;
+    for (const int idx : inliers.indices) {
+      const auto &p = candidates->points[static_cast<std::size_t>(idx)];
+      const double residual = (a * p.x + b * p.y + c * p.z + d) / normal_norm;
+      squared_error += residual * residual;
+    }
+    result.rmse = std::sqrt(squared_error / static_cast<double>(result.inliers));
+    result.normal = Eigen::Vector3d(a, b, c) / normal_norm;
+    if (result.normal.z() < 0.0) result.normal = -result.normal;
+    if (result.inlier_ratio < min_inlier_ratio_ || result.rmse > max_rmse_) return {};
     if (ground_must_be_negative_ && result.height >= -ground_z_margin_) {
       return {};
     }
@@ -228,28 +269,59 @@ class GroundZCalibration final : public rclcpp::Node {
   void cloudCallback(int index, Msg::ConstSharedPtr msg) {
     const auto cloud = toCloud(*msg);
     if (cloud->size() < static_cast<std::size_t>(min_points_)) return;
-    const GroundEstimate ground = estimateGround(cloud);
+    GroundEstimate ground = estimateGround(cloud);
+    if (ground.valid && have_previous_ground_[index]) {
+      if (std::abs(ground.height - previous_ground_[index].height) > max_height_jump_ ||
+          ground.normal.dot(previous_ground_[index].normal) < min_normal_cosine_) {
+        ground = {};
+      }
+    }
+    if (ground.valid) { previous_ground_[index] = ground; have_previous_ground_[index] = true; }
     std::lock_guard<std::mutex> lock(mutex_);
     latest_cloud_[index] = cloud;
     latest_stamp_[index] = rclcpp::Time(msg->header.stamp);
-    if (ground.valid) {
-      latest_ground_[index] = ground.height;
-      latest_inliers_[index] = ground.inliers;
-    }
-    if (latest_ground_[0] == latest_ground_[0] && latest_ground_[1] == latest_ground_[1] &&
-        std::abs((latest_stamp_[0] - latest_stamp_[1]).seconds()) <= sync_tolerance_) {
-      ground_differences_.push_back(latest_ground_[0] - latest_ground_[1]);
-      while (ground_differences_.size() > static_cast<std::size_t>(max_samples_)) {
-        ground_differences_.pop_front();
-      }
-      if (ground_differences_.size() >= static_cast<std::size_t>(min_samples_)) {
-        std::vector<double> samples(ground_differences_.begin(), ground_differences_.end());
-        z_offset_ = median(std::move(samples));
-        calibrated_ = std::isfinite(z_offset_);
-        if (calibrated_ && !saved_) saveCalibration();
-      }
-    }
+    latest_ground_valid_[index] = ground.valid;
+    if (ground.valid) { latest_ground_[index] = ground.height; latest_inliers_[index] = ground.inliers; }
+    frame_queues_[index].push_back(Frame{cloud, latest_stamp_[index], ground});
+    while (frame_queues_[index].size() > static_cast<std::size_t>(frame_queue_size_)) frame_queues_[index].pop_front();
+    processSynchronizedPair();
     publishLatest();
+  }
+
+  void processSynchronizedPair() {
+    if (frame_queues_[0].empty() || frame_queues_[1].empty()) return;
+    double best = sync_tolerance_ + 1.0; std::size_t bi = 0, bj = 0;
+    for (std::size_t i = 0; i < frame_queues_[0].size(); ++i) for (std::size_t j = 0; j < frame_queues_[1].size(); ++j) {
+      if (!frame_queues_[0][i].ground.valid || !frame_queues_[1][j].ground.valid) continue;
+      const double dt = std::abs((frame_queues_[0][i].stamp - frame_queues_[1][j].stamp).seconds());
+      if (dt < best) { best = dt; bi = i; bj = j; }
+    }
+    if (best > sync_tolerance_) return;
+    const double diff = frame_queues_[0][bi].ground.height - frame_queues_[1][bj].ground.height;
+    calibration_ground_[0] = frame_queues_[0][bi].ground.height;
+    calibration_ground_[1] = frame_queues_[1][bj].ground.height;
+    ground_differences_.push_back(diff);
+    while (ground_differences_.size() > static_cast<std::size_t>(max_samples_)) ground_differences_.pop_front();
+    frame_queues_[0].erase(frame_queues_[0].begin(), frame_queues_[0].begin() + static_cast<std::ptrdiff_t>(bi + 1));
+    frame_queues_[1].erase(frame_queues_[1].begin(), frame_queues_[1].begin() + static_cast<std::ptrdiff_t>(bj + 1));
+    if (ground_differences_.size() >= static_cast<std::size_t>(calibration_min_samples_)) {
+      std::vector<double> samples(ground_differences_.begin(), ground_differences_.end());
+      const double preliminary_median = median(samples);
+      std::vector<double> deviations; deviations.reserve(samples.size());
+      for (double v : samples) deviations.push_back(std::abs(v - preliminary_median));
+      const double mad = median(deviations);
+      if (std::isfinite(mad) && mad > 1e-6) {
+        const double cutoff = 3.0 * mad;
+        samples.erase(std::remove_if(samples.begin(), samples.end(),
+                                     [&](double v) {
+                                       return std::abs(v - preliminary_median) > cutoff;
+                                     }), samples.end());
+      }
+      z_offset_ = median(samples);
+      calibration_mad_ = mad;
+      calibrated_ = std::isfinite(z_offset_) && std::isfinite(mad) && mad <= calibration_max_mad_;
+      if (calibrated_ && !saved_) saveCalibration();
+    }
   }
 
   void publishLatest() {
@@ -284,15 +356,17 @@ class GroundZCalibration final : public rclcpp::Node {
     }
     output << std::setprecision(12)
            << "# Ground based z calibration (meters)\n"
-           << "lidar1_ground_height: " << latest_ground_[0] << "\n"
-           << "lidar2_ground_height: " << latest_ground_[1] << "\n"
+           << "lidar1_ground_height: " << calibration_ground_[0] << "\n"
+           << "lidar2_ground_height: " << calibration_ground_[1] << "\n"
            << "# lidar1=lidar5, lidar2=lidar3; ground is expected on negative lidar Z\n"
-           << "lidar5_ground_height: " << latest_ground_[0] << "\n"
-           << "lidar3_ground_height: " << latest_ground_[1] << "\n"
-           << "gimbal_height_above_ground: " << -latest_ground_[1] << "\n"
+           << "lidar5_ground_height: " << calibration_ground_[0] << "\n"
+           << "lidar3_ground_height: " << calibration_ground_[1] << "\n"
+           << "gimbal_height_above_ground: " << -calibration_ground_[1] << "\n"
            << "z_offset_lidar3_to_lidar5: " << z_offset_ << "\n"
            << "z_translation_lidar5_to_lidar3: "
-           << (latest_ground_[1] - latest_ground_[0]) << "\n";
+           << (calibration_ground_[1] - calibration_ground_[0]) << "\n"
+           << "calibration_samples: " << ground_differences_.size() << "\n"
+           << "calibration_mad: " << calibration_mad_ << "\n";
     if (lidar3_transform_loaded_ && lidar5_transform_loaded_) {
       writeGroundAlignedTransforms(output);
     }
@@ -326,7 +400,7 @@ class GroundZCalibration final : public rclcpp::Node {
     Transform lidar5_to_gimbal = lidar5_to_gimbal_;
     lidar3_to_gimbal.translation().z() = 0.0;
     lidar5_to_gimbal.translation().z() =
-        latest_ground_[1] - latest_ground_[0];
+        calibration_ground_[1] - calibration_ground_[0];
     const Transform lidar5_to_lidar3 =
         lidar3_to_gimbal.inverse() * lidar5_to_gimbal;
     const Transform lidar3_to_lidar5 =
@@ -352,7 +426,7 @@ class GroundZCalibration final : public rclcpp::Node {
 
   void report() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (latest_ground_[0] == latest_ground_[0] && latest_ground_[1] == latest_ground_[1]) {
+    if (latest_ground_valid_[0] && latest_ground_valid_[1]) {
       RCLCPP_INFO(get_logger(), "ground heights: lidar5=%.4f m (%zu), lidar3=%.4f m (%zu), samples=%zu, lidar3_to_lidar5_z_offset=%.4f m%s",
                   latest_ground_[0], latest_inliers_[0], latest_ground_[1], latest_inliers_[1],
                   ground_differences_.size(), z_offset_, calibrated_ ? " [calibrated]" : "");
@@ -377,9 +451,18 @@ class GroundZCalibration final : public rclcpp::Node {
   double z_max_ = 0.0;
   double ground_z_margin_ = 0.02;
   double sync_tolerance_ = 0.10;
+  double roi_x_min_ = -30.0, roi_x_max_ = 30.0, roi_y_min_ = -10.0, roi_y_max_ = 10.0;
+  double voxel_leaf_ = 0.03, min_inlier_ratio_ = 0.20, max_rmse_ = 0.025;
+  double max_height_jump_ = 0.15, min_normal_cosine_ = 0.985;
+  int calibration_min_samples_ = 50, frame_queue_size_ = 30;
+  double calibration_max_mad_ = 0.015;
+  double calibration_mad_ = std::numeric_limits<double>::quiet_NaN();
   bool ground_must_be_negative_ = true;
   double latest_ground_[2] = {std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::quiet_NaN()};
+  double calibration_ground_[2] = {std::numeric_limits<double>::quiet_NaN(),
+                                   std::numeric_limits<double>::quiet_NaN()};
+  bool latest_ground_valid_[2] = {false, false};
   std::size_t latest_inliers_[2] = {0, 0};
   rclcpp::Time latest_stamp_[2]{rclcpp::Time(0, 0, RCL_ROS_TIME),
                                 rclcpp::Time(0, 0, RCL_ROS_TIME)};
@@ -392,6 +475,9 @@ class GroundZCalibration final : public rclcpp::Node {
   bool lidar5_transform_loaded_ = false;
   Transform lidar3_to_gimbal_ = Transform::Identity();
   Transform lidar5_to_gimbal_ = Transform::Identity();
+  std::deque<Frame> frame_queues_[2];
+  GroundEstimate previous_ground_[2];
+  bool have_previous_ground_[2] = {false, false};
   std::mutex mutex_;
   rclcpp::Subscription<Msg>::SharedPtr subscriptions_[2];
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publishers_[2];

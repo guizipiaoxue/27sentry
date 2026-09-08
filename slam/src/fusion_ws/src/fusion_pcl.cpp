@@ -66,9 +66,10 @@ class FusionPcl final : public rclcpp::Node {
     transforms_[1] = loadTransform(lidar3_calibration);
 
     const auto qos = rclcpp::SensorDataQoS();
+    const auto output_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
     cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-        cloud_output_topic_, qos);
-    imu_pub_ = create_publisher<Imu>(imu_output_topic_, qos);
+        cloud_output_topic_, output_qos);
+    imu_pub_ = create_publisher<Imu>(imu_output_topic_, output_qos);
 
     for (std::size_t i = 0; i < 2; ++i) {
       cloud_subs_[i] = create_subscription<CustomMsg>(

@@ -15,6 +15,7 @@
 #include <string>
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <pcl/common/transforms.h>
@@ -24,6 +25,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <yaml-cpp/yaml.h>
 
 class FusionPcl final : public rclcpp::Node {
@@ -53,6 +55,19 @@ class FusionPcl final : public rclcpp::Node {
         "cloud_sync_tolerance", 0.03);
     imu_sync_tolerance_ = declare_parameter<double>(
         "imu_sync_tolerance", 0.004);
+    imu_calibration_seconds_ = declare_parameter<double>(
+        "imu_calibration_seconds", 3.0);
+    imu_calibration_min_samples_ = declare_parameter<std::int64_t>(
+        "imu_calibration_min_samples", 400);
+    gravity_ = declare_parameter<double>("gravity", 9.80665);
+    max_gyro_stddev_ = declare_parameter<double>(
+        "max_calibration_gyro_stddev", 0.02);
+    max_gyro_mean_ = declare_parameter<double>(
+        "max_calibration_gyro_mean", 0.1);
+    max_accel_stddev_ = declare_parameter<double>(
+        "max_calibration_accel_stddev", 0.15);
+    max_gravity_error_ = declare_parameter<double>(
+        "max_calibration_gravity_error", 2.0);
     max_queue_size_ = static_cast<std::size_t>(std::max<std::int64_t>(
         2, declare_parameter<std::int64_t>("max_queue_size", 100)));
 
@@ -70,6 +85,12 @@ class FusionPcl final : public rclcpp::Node {
     cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         cloud_output_topic_, output_qos);
     imu_pub_ = create_publisher<Imu>(imu_output_topic_, output_qos);
+    calibration_pub_ = create_publisher<std_msgs::msg::Bool>(
+        "/gimbal/imu_calibrated",
+        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+    std_msgs::msg::Bool initial_status;
+    initial_status.data = false;
+    calibration_pub_->publish(initial_status);
 
     for (std::size_t i = 0; i < 2; ++i) {
       cloud_subs_[i] = create_subscription<CustomMsg>(
@@ -89,6 +110,10 @@ class FusionPcl final : public rclcpp::Node {
         "fusing lidar5/lidar3 -> %s and imu5/imu3 -> %s (frame: %s)",
         cloud_output_topic_.c_str(), imu_output_topic_.c_str(),
         frame_id_.c_str());
+    RCLCPP_INFO(
+        get_logger(),
+        "keep both lidars stationary for %.1f s while their IMUs calibrate",
+        imu_calibration_seconds_);
   }
 
  private:
@@ -96,6 +121,19 @@ class FusionPcl final : public rclcpp::Node {
   struct TimedMessage {
     rclcpp::Time stamp;
     std::shared_ptr<const MessageT> message;
+  };
+
+  struct ImuCalibration {
+    rclcpp::Time start{0, 0, RCL_ROS_TIME};
+    Eigen::Vector3d gyro_sum = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gyro_square_sum = Eigen::Vector3d::Zero();
+    Eigen::Vector3d accel_sum = Eigen::Vector3d::Zero();
+    Eigen::Vector3d accel_square_sum = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero();
+    Eigen::Vector3d accel_bias_gimbal = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d imu_to_gimbal = Eigen::Matrix3d::Identity();
+    std::size_t samples = 0;
+    bool complete = false;
   };
 
   static Eigen::Matrix4d loadTransform(const std::string &file_name) {
@@ -213,10 +251,115 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void imuCallback(std::size_t index, Imu::ConstSharedPtr message) {
+    if (!calibrations_[index].complete) {
+      calibrateImu(index, *message);
+      return;
+    }
+    if (!imu_calibration_complete_) {
+      return;
+    }
     imu_queues_[index].push_back(
         {rclcpp::Time(message->header.stamp), std::move(message)});
     limitQueue(imu_queues_[index]);
     synchronizeImus();
+  }
+
+  void resetCalibration(std::size_t index, const rclcpp::Time &stamp) {
+    calibrations_[index] = ImuCalibration{};
+    calibrations_[index].start = stamp;
+  }
+
+  void calibrateImu(std::size_t index, const Imu &imu) {
+    const Eigen::Vector3d gyro = angularVelocity(imu);
+    const Eigen::Vector3d accel = linearAcceleration(imu);
+    if (!gyro.allFinite() || !accel.allFinite()) {
+      return;
+    }
+
+    const rclcpp::Time stamp(imu.header.stamp);
+    auto &calibration = calibrations_[index];
+    if (calibration.samples == 0) {
+      calibration.start = stamp;
+    }
+    calibration.gyro_sum += gyro;
+    calibration.gyro_square_sum += gyro.cwiseProduct(gyro);
+    calibration.accel_sum += accel;
+    calibration.accel_square_sum += accel.cwiseProduct(accel);
+    ++calibration.samples;
+
+    if ((stamp - calibration.start).seconds() < imu_calibration_seconds_) {
+      return;
+    }
+    if (calibration.samples <
+        static_cast<std::size_t>(imu_calibration_min_samples_)) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "lidar%zu IMU calibration has only %zu samples; keep waiting",
+          index == 0 ? 5UL : 3UL, calibration.samples);
+      return;
+    }
+
+    const double count = static_cast<double>(calibration.samples);
+    const Eigen::Vector3d gyro_mean = calibration.gyro_sum / count;
+    const Eigen::Vector3d accel_mean = calibration.accel_sum / count;
+    const Eigen::Vector3d gyro_variance =
+        (calibration.gyro_square_sum / count -
+         gyro_mean.cwiseProduct(gyro_mean))
+            .cwiseMax(0.0);
+    const Eigen::Vector3d accel_variance =
+        (calibration.accel_square_sum / count -
+         accel_mean.cwiseProduct(accel_mean))
+            .cwiseMax(0.0);
+    const double gyro_stddev = gyro_variance.cwiseSqrt().maxCoeff();
+    const double accel_stddev = accel_variance.cwiseSqrt().maxCoeff();
+    const double gravity_error = std::abs(accel_mean.norm() - gravity_);
+
+    if (gyro_mean.norm() > max_gyro_mean_ ||
+        gyro_stddev > max_gyro_stddev_ ||
+        accel_stddev > max_accel_stddev_ ||
+        gravity_error > max_gravity_error_) {
+      RCLCPP_WARN(
+          get_logger(),
+          "lidar%zu moved during IMU calibration (gyro mean %.4f, gyro std "
+          "%.4f, accel std %.4f, gravity error %.3f); restarting",
+          index == 0 ? 5UL : 3UL, gyro_mean.norm(), gyro_stddev,
+          accel_stddev, gravity_error);
+      resetCalibration(index, stamp);
+      return;
+    }
+
+    const Eigen::Matrix3d nominal_rotation =
+        transforms_[index].block<3, 3>(0, 0);
+    const Eigen::Vector3d measured_gravity = nominal_rotation * accel_mean;
+    const Eigen::Quaterniond gravity_alignment =
+        Eigen::Quaterniond::FromTwoVectors(
+            measured_gravity.normalized(), Eigen::Vector3d::UnitZ());
+    calibration.imu_to_gimbal =
+        gravity_alignment.toRotationMatrix() * nominal_rotation;
+    calibration.gyro_bias = gyro_mean;
+    calibration.accel_bias_gimbal =
+        calibration.imu_to_gimbal * accel_mean -
+        Eigen::Vector3d(0.0, 0.0, gravity_);
+    calibration.complete = true;
+
+    RCLCPP_INFO(
+        get_logger(),
+        "lidar%zu IMU calibrated with %zu samples; gyro bias "
+        "[%.6f %.6f %.6f]",
+        index == 0 ? 5UL : 3UL, calibration.samples, gyro_mean.x(),
+        gyro_mean.y(), gyro_mean.z());
+
+    if (calibrations_[0].complete && calibrations_[1].complete) {
+      imu_calibration_complete_ = true;
+      imu_queues_[0].clear();
+      imu_queues_[1].clear();
+      std_msgs::msg::Bool status;
+      status.data = true;
+      calibration_pub_->publish(status);
+      RCLCPP_INFO(
+          get_logger(),
+          "both IMUs calibrated; fused IMU output is now enabled");
+    }
   }
 
   void synchronizeImus() {
@@ -253,14 +396,16 @@ class FusionPcl final : public rclcpp::Node {
 
   void publishImuPair(
       const TimedMessage<Imu> &imu5, const TimedMessage<Imu> &imu3) {
-    const Eigen::Vector3d gyro5 =
-        transforms_[0].block<3, 3>(0, 0) * angularVelocity(*imu5.message);
-    const Eigen::Vector3d gyro3 =
-        transforms_[1].block<3, 3>(0, 0) * angularVelocity(*imu3.message);
+    const Eigen::Vector3d gyro5 = calibrations_[0].imu_to_gimbal *
+        (angularVelocity(*imu5.message) - calibrations_[0].gyro_bias);
+    const Eigen::Vector3d gyro3 = calibrations_[1].imu_to_gimbal *
+        (angularVelocity(*imu3.message) - calibrations_[1].gyro_bias);
     const Eigen::Vector3d accel5 =
-        transforms_[0].block<3, 3>(0, 0) * linearAcceleration(*imu5.message);
+        calibrations_[0].imu_to_gimbal * linearAcceleration(*imu5.message) -
+        calibrations_[0].accel_bias_gimbal;
     const Eigen::Vector3d accel3 =
-        transforms_[1].block<3, 3>(0, 0) * linearAcceleration(*imu3.message);
+        calibrations_[1].imu_to_gimbal * linearAcceleration(*imu3.message) -
+        calibrations_[1].accel_bias_gimbal;
 
     const Eigen::Vector3d gyro = 0.5 * (gyro5 + gyro3);
     const Eigen::Vector3d accel = 0.5 * (accel5 + accel3);
@@ -292,16 +437,26 @@ class FusionPcl final : public rclcpp::Node {
   std::string frame_id_;
   double cloud_sync_tolerance_ = 0.03;
   double imu_sync_tolerance_ = 0.004;
+  double imu_calibration_seconds_ = 3.0;
+  std::int64_t imu_calibration_min_samples_ = 400;
+  double gravity_ = 9.80665;
+  double max_gyro_stddev_ = 0.02;
+  double max_gyro_mean_ = 0.1;
+  double max_accel_stddev_ = 0.15;
+  double max_gravity_error_ = 2.0;
+  bool imu_calibration_complete_ = false;
   std::size_t max_queue_size_ = 100;
   std::array<Eigen::Matrix4d, 2> transforms_ = {
       Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity()};
 
   std::array<std::deque<TimedMessage<CustomMsg>>, 2> cloud_queues_;
   std::array<std::deque<TimedMessage<Imu>>, 2> imu_queues_;
+  std::array<ImuCalibration, 2> calibrations_;
   std::array<rclcpp::Subscription<CustomMsg>::SharedPtr, 2> cloud_subs_;
   std::array<rclcpp::Subscription<Imu>::SharedPtr, 2> imu_subs_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Imu>::SharedPtr imu_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr calibration_pub_;
 };
 
 int main(int argc, char **argv) {

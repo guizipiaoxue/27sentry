@@ -14,6 +14,7 @@ find_package(PCL REQUIRED COMPONENTS common)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 if(BUILD_TESTING)
@@ -35,7 +36,8 @@ ament_target_dependencies(
   livox_ros_driver2
   pcl_conversions
   rclcpp
-  sensor_msgs)
+  sensor_msgs
+  std_msgs)
 target_include_directories(fusion_pcl PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(fusion_pcl Eigen3::Eigen ${PCL_LIBRARIES} yaml-cpp)
 

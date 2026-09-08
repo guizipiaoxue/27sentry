@@ -54,6 +54,7 @@ DLIO_PARAMS="${DLIO_PARAMS:-${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/
 LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
 DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
 FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
+IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
 
 for config_file in "${LIVOX_CONFIG}" "${DLIO_CONFIG}" "${DLIO_PARAMS}"; do
   if [[ ! -f "${config_file}" ]]; then
@@ -134,6 +135,18 @@ if ! kill -0 "${FUSION_PID}" 2>/dev/null; then
   echo "[start_odom] Fusion node exited during startup." >&2
   wait "${FUSION_PID}"
 fi
+
+echo "[start_odom] Keep the gimbal stationary; waiting for both IMUs to calibrate..."
+if ! timeout "${IMU_CALIBRATION_TIMEOUT}" \
+    ros2 topic echo /gimbal/imu_calibrated std_msgs/msg/Bool \
+      --once --filter 'm.data' --field data \
+      --qos-reliability reliable --qos-durability transient_local \
+    | grep -Fxq "true"; then
+  echo "[start_odom] IMU calibration did not complete within ${IMU_CALIBRATION_TIMEOUT}s." >&2
+  echo "             Keep both lidars stationary and check both IMU topics." >&2
+  exit 1
+fi
+echo "[start_odom] Both IMUs calibrated."
 
 echo "[start_odom] Starting fused DLIO odometry..."
 setsid ros2 run odom_ws odom --ros-args \

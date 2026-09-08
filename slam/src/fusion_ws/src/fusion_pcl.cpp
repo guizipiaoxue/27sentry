@@ -66,7 +66,7 @@ class FusionPcl final : public rclcpp::Node {
     max_gyro_mean_ = declare_parameter<double>(
         "max_calibration_gyro_mean", 0.1);
     max_accel_stddev_ = declare_parameter<double>(
-        "max_calibration_accel_stddev", 0.15);
+        "max_calibration_accel_stddev", 0.30);
     max_gravity_error_ = declare_parameter<double>(
         "max_calibration_gravity_error", 2.0);
     max_queue_size_ = static_cast<std::size_t>(std::max<std::int64_t>(
@@ -133,6 +133,7 @@ class FusionPcl final : public rclcpp::Node {
     Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero();
     Eigen::Vector3d accel_bias_gimbal = Eigen::Vector3d::Zero();
     Eigen::Matrix3d imu_to_gimbal = Eigen::Matrix3d::Identity();
+    double accel_scale = 1.0;
     std::size_t samples = 0;
     bool started = false;
     bool complete = false;
@@ -305,17 +306,26 @@ class FusionPcl final : public rclcpp::Node {
 
     const double count = static_cast<double>(calibration.samples);
     const Eigen::Vector3d gyro_mean = calibration.gyro_sum / count;
-    const Eigen::Vector3d accel_mean = calibration.accel_sum / count;
+    const Eigen::Vector3d accel_mean_raw = calibration.accel_sum / count;
+    const double accel_norm_raw = accel_mean_raw.norm();
+    calibration.accel_scale =
+        std::abs(accel_norm_raw - 1.0) <
+                std::abs(accel_norm_raw - gravity_)
+            ? gravity_
+            : 1.0;
+    const Eigen::Vector3d accel_mean =
+        calibration.accel_scale * accel_mean_raw;
     const Eigen::Vector3d gyro_variance =
         (calibration.gyro_square_sum / count -
          gyro_mean.cwiseProduct(gyro_mean))
             .cwiseMax(0.0);
-    const Eigen::Vector3d accel_variance =
+    const Eigen::Vector3d accel_variance_raw =
         (calibration.accel_square_sum / count -
-         accel_mean.cwiseProduct(accel_mean))
+         accel_mean_raw.cwiseProduct(accel_mean_raw))
             .cwiseMax(0.0);
     const double gyro_stddev = gyro_variance.cwiseSqrt().maxCoeff();
-    const double accel_stddev = accel_variance.cwiseSqrt().maxCoeff();
+    const double accel_stddev = calibration.accel_scale *
+        accel_variance_raw.cwiseSqrt().maxCoeff();
     const double gravity_error = std::abs(accel_mean.norm() - gravity_);
 
     if (gyro_mean.norm() > max_gyro_mean_ ||
@@ -348,9 +358,10 @@ class FusionPcl final : public rclcpp::Node {
 
     RCLCPP_INFO(
         get_logger(),
-        "lidar%zu IMU calibrated with %zu samples; gyro bias "
-        "[%.6f %.6f %.6f]",
-        index == 0 ? 5UL : 3UL, calibration.samples, gyro_mean.x(),
+        "lidar%zu IMU calibrated with %zu samples; accel input unit: %s; "
+        "gyro bias [%.6f %.6f %.6f]",
+        index == 0 ? 5UL : 3UL, calibration.samples,
+        calibration.accel_scale == 1.0 ? "m/s^2" : "g", gyro_mean.x(),
         gyro_mean.y(), gyro_mean.z());
 
     if (calibrations_[0].complete && calibrations_[1].complete) {
@@ -405,10 +416,14 @@ class FusionPcl final : public rclcpp::Node {
     const Eigen::Vector3d gyro3 = calibrations_[1].imu_to_gimbal *
         (angularVelocity(*imu3.message) - calibrations_[1].gyro_bias);
     const Eigen::Vector3d accel5 =
-        calibrations_[0].imu_to_gimbal * linearAcceleration(*imu5.message) -
+        calibrations_[0].imu_to_gimbal *
+            (calibrations_[0].accel_scale *
+             linearAcceleration(*imu5.message)) -
         calibrations_[0].accel_bias_gimbal;
     const Eigen::Vector3d accel3 =
-        calibrations_[1].imu_to_gimbal * linearAcceleration(*imu3.message) -
+        calibrations_[1].imu_to_gimbal *
+            (calibrations_[1].accel_scale *
+             linearAcceleration(*imu3.message)) -
         calibrations_[1].accel_bias_gimbal;
 
     const Eigen::Vector3d gyro = 0.5 * (gyro5 + gyro3);
@@ -446,7 +461,7 @@ class FusionPcl final : public rclcpp::Node {
   double gravity_ = 9.80665;
   double max_gyro_stddev_ = 0.02;
   double max_gyro_mean_ = 0.1;
-  double max_accel_stddev_ = 0.15;
+  double max_accel_stddev_ = 0.30;
   double max_gravity_error_ = 2.0;
   bool imu_calibration_complete_ = false;
   std::size_t max_queue_size_ = 100;

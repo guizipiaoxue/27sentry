@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${SCRIPT_DIR}"
+
+ROS_SETUP="/opt/ros/humble/setup.bash"
+LIVOX_SETUP="${ROOT_DIR}/livox/install/setup.bash"
+SLAM_SETUP="${ROOT_DIR}/slam/install/setup.bash"
+ODOM_SETUP="${ROOT_DIR}/odom/install/setup.bash"
+
+for setup_file in "${ROS_SETUP}" "${LIVOX_SETUP}" "${SLAM_SETUP}" "${ODOM_SETUP}"; do
+  if [[ ! -f "${setup_file}" ]]; then
+    echo "[start_odom] Missing setup file: ${setup_file}" >&2
+    echo "[start_odom] Build the corresponding workspace first." >&2
+    exit 1
+  fi
+done
+
+# ROS setup scripts can reference unset variables, so nounset is temporarily
+# disabled while sourcing the three overlays.
+set +u
+source "${ROS_SETUP}"
+source "${LIVOX_SETUP}"
+source "${SLAM_SETUP}"
+source "${ODOM_SETUP}"
+set -u
+
+# Livox ROS Driver 2 links against the SDK shared library. SDK_DIR may be used
+# to override the installation directory; /usr/local/lib is used on this host.
+SDK_DIRS=(
+  "${SDK_DIR:-}"
+  "/usr/local/lib"
+  "${ROOT_DIR}/../Livox-SDK2/build/sdk_core"
+  "${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
+)
+SDK_FOUND=""
+for sdk_dir in "${SDK_DIRS[@]}"; do
+  if [[ -n "${sdk_dir}" && -f "${sdk_dir}/liblivox_lidar_sdk_shared.so" ]]; then
+    SDK_FOUND="${sdk_dir}"
+    break
+  fi
+done
+if [[ -z "${SDK_FOUND}" ]]; then
+  echo "[start_odom] liblivox_lidar_sdk_shared.so not found." >&2
+  echo "             Set SDK_DIR=/path/to/lib or install it in /usr/local/lib." >&2
+  exit 1
+fi
+export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"
+
+LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
+DLIO_CONFIG="${DLIO_CONFIG:-${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/dlio.yaml}"
+DLIO_PARAMS="${DLIO_PARAMS:-${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/params.yaml}"
+LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
+DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
+FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
+
+for config_file in "${LIVOX_CONFIG}" "${DLIO_CONFIG}" "${DLIO_PARAMS}"; do
+  if [[ ! -f "${config_file}" ]]; then
+    echo "[start_odom] Missing configuration file: ${config_file}" >&2
+    exit 1
+  fi
+done
+
+for package_executable in \
+    "livox_ros_driver2 livox_ros_driver2_node" \
+    "fusion_ws fusion_pcl" \
+    "odom_ws odom"; do
+  read -r package executable <<<"${package_executable}"
+  if ! ros2 pkg executables "${package}" | awk '{print $2}' | grep -Fxq "${executable}"; then
+    echo "[start_odom] ${package}/${executable} is not built or not sourced." >&2
+    exit 1
+  fi
+done
+
+DRIVER_PID=""
+FUSION_PID=""
+ODOM_PID=""
+
+stop_process_group() {
+  local pid="$1"
+  local signal="$2"
+  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+    kill "-${signal}" -- "-${pid}" 2>/dev/null ||
+      kill "-${signal}" "${pid}" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+
+  stop_process_group "${ODOM_PID}" TERM
+  stop_process_group "${FUSION_PID}" TERM
+  stop_process_group "${DRIVER_PID}" TERM
+  sleep 1
+  stop_process_group "${ODOM_PID}" KILL
+  stop_process_group "${FUSION_PID}" KILL
+  stop_process_group "${DRIVER_PID}" KILL
+  wait 2>/dev/null || true
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+DRIVER_ARGS=(
+  ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args
+  -p xfer_format:=1
+  -p multi_topic:=1
+  -p data_src:=0
+  -p publish_freq:=10.0
+  -p output_data_type:=0
+  -p frame_id:=livox_frame
+  -p user_config_path:="${LIVOX_CONFIG}"
+)
+if [[ -n "${LIVOX_BROADCAST_CODE}" ]]; then
+  DRIVER_ARGS+=( -p cmdline_input_bd_code:="${LIVOX_BROADCAST_CODE}" )
+fi
+
+echo "[start_odom] SDK: ${SDK_FOUND}"
+echo "[start_odom] Starting Livox driver for lidar 5 and lidar 3..."
+setsid "${DRIVER_ARGS[@]}" &
+DRIVER_PID=$!
+sleep "${DRIVER_STARTUP_WAIT}"
+if ! kill -0 "${DRIVER_PID}" 2>/dev/null; then
+  echo "[start_odom] Livox driver exited during startup." >&2
+  wait "${DRIVER_PID}"
+fi
+
+echo "[start_odom] Starting point-cloud and IMU fusion..."
+setsid ros2 run fusion_ws fusion_pcl &
+FUSION_PID=$!
+sleep "${FUSION_STARTUP_WAIT}"
+if ! kill -0 "${FUSION_PID}" 2>/dev/null; then
+  echo "[start_odom] Fusion node exited during startup." >&2
+  wait "${FUSION_PID}"
+fi
+
+echo "[start_odom] Starting fused DLIO odometry..."
+setsid ros2 run odom_ws odom --ros-args \
+  --params-file "${DLIO_CONFIG}" \
+  --params-file "${DLIO_PARAMS}" \
+  -r pointcloud:=/gimbal/cloud_fused \
+  -r imu:=/gimbal/imu_fused \
+  -r path:=/path \
+  -r deskewed:=/fusion_pcl \
+  -p imu/calibration:=false \
+  -p pointcloud/deskew:=false \
+  -p odom/computeTimeOffset:=false \
+  -p publish/pose_odom:=false \
+  -p publish/keyframes:=false \
+  -p frames/odom:=odom \
+  -p frames/baselink:=gimbal \
+  -p frames/lidar:=fusion_lidar \
+  -p frames/imu:=fusion_imu &
+ODOM_PID=$!
+
+echo "[start_odom] Running. RViz Fixed Frame: odom"
+echo "[start_odom] Topics: /fusion_pcl, /path, /tf"
+echo "[start_odom] Press Ctrl+C to stop all nodes."
+
+# Returning when any child exits prevents a partially running pipeline.
+wait -n "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}"

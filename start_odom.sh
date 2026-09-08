@@ -139,9 +139,9 @@ fi
 echo "[start_odom] Keep the gimbal stationary; waiting for both IMUs to calibrate..."
 if ! timeout "${IMU_CALIBRATION_TIMEOUT}" \
     ros2 topic echo /gimbal/imu_calibrated std_msgs/msg/Bool \
-      --once --filter 'm.data' --field data \
+      --once --filter 'm.data' \
       --qos-reliability reliable --qos-durability transient_local \
-    | grep -Fxq "true"; then
+    | grep -Fq "data: true"; then
   echo "[start_odom] IMU calibration did not complete within ${IMU_CALIBRATION_TIMEOUT}s." >&2
   echo "             Keep both lidars stationary and check both IMU topics." >&2
   exit 1

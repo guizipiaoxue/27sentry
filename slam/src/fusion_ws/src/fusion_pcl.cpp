@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -124,7 +125,7 @@ class FusionPcl final : public rclcpp::Node {
   };
 
   struct ImuCalibration {
-    rclcpp::Time start{0, 0, RCL_ROS_TIME};
+    std::chrono::steady_clock::time_point start;
     Eigen::Vector3d gyro_sum = Eigen::Vector3d::Zero();
     Eigen::Vector3d gyro_square_sum = Eigen::Vector3d::Zero();
     Eigen::Vector3d accel_sum = Eigen::Vector3d::Zero();
@@ -133,6 +134,7 @@ class FusionPcl final : public rclcpp::Node {
     Eigen::Vector3d accel_bias_gimbal = Eigen::Vector3d::Zero();
     Eigen::Matrix3d imu_to_gimbal = Eigen::Matrix3d::Identity();
     std::size_t samples = 0;
+    bool started = false;
     bool complete = false;
   };
 
@@ -264,9 +266,8 @@ class FusionPcl final : public rclcpp::Node {
     synchronizeImus();
   }
 
-  void resetCalibration(std::size_t index, const rclcpp::Time &stamp) {
+  void resetCalibration(std::size_t index) {
     calibrations_[index] = ImuCalibration{};
-    calibrations_[index].start = stamp;
   }
 
   void calibrateImu(std::size_t index, const Imu &imu) {
@@ -276,10 +277,11 @@ class FusionPcl final : public rclcpp::Node {
       return;
     }
 
-    const rclcpp::Time stamp(imu.header.stamp);
     auto &calibration = calibrations_[index];
-    if (calibration.samples == 0) {
-      calibration.start = stamp;
+    const auto now = std::chrono::steady_clock::now();
+    if (!calibration.started) {
+      calibration.start = now;
+      calibration.started = true;
     }
     calibration.gyro_sum += gyro;
     calibration.gyro_square_sum += gyro.cwiseProduct(gyro);
@@ -287,7 +289,9 @@ class FusionPcl final : public rclcpp::Node {
     calibration.accel_square_sum += accel.cwiseProduct(accel);
     ++calibration.samples;
 
-    if ((stamp - calibration.start).seconds() < imu_calibration_seconds_) {
+    const double elapsed =
+        std::chrono::duration<double>(now - calibration.start).count();
+    if (elapsed < imu_calibration_seconds_) {
       return;
     }
     if (calibration.samples <
@@ -324,7 +328,7 @@ class FusionPcl final : public rclcpp::Node {
           "%.4f, accel std %.4f, gravity error %.3f); restarting",
           index == 0 ? 5UL : 3UL, gyro_mean.norm(), gyro_stddev,
           accel_stddev, gravity_error);
-      resetCalibration(index, stamp);
+      resetCalibration(index);
       return;
     }
 

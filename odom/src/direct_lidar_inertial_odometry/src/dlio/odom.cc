@@ -43,17 +43,27 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
   this->imu_sub = this->create_subscription<sensor_msgs::msg::Imu>("imu", rclcpp::SensorDataQoS(),
       std::bind(&dlio::OdomNode::callbackImu, this, std::placeholders::_1), imu_sub_opt);
 
-  this->odom_pub     = this->create_publisher<nav_msgs::msg::Odometry>("odom", 1);
-  this->pose_pub     = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
   this->path_pub     = this->create_publisher<nav_msgs::msg::Path>("path", 1);
-  this->kf_pose_pub  = this->create_publisher<geometry_msgs::msg::PoseArray>("kf_pose", 1);
-  this->kf_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("kf_cloud", 1);
   this->deskewed_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("deskewed", 1);
+
+  if (this->publish_pose_odom_) {
+    this->odom_pub = this->create_publisher<nav_msgs::msg::Odometry>("odom", 1);
+    this->pose_pub = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 1);
+  }
+  if (this->publish_keyframes_) {
+    this->kf_pose_pub =
+        this->create_publisher<geometry_msgs::msg::PoseArray>("kf_pose", 1);
+    this->kf_cloud_pub =
+        this->create_publisher<sensor_msgs::msg::PointCloud2>("kf_cloud", 1);
+  }
 
   this->br = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 
-  this->publish_timer = this->create_wall_timer(std::chrono::duration<double>(1.0 / 30.0), 
-      std::bind(&dlio::OdomNode::publishPose, this));
+  if (this->publish_pose_odom_) {
+    this->publish_timer = this->create_wall_timer(
+        std::chrono::duration<double>(1.0 / 30.0),
+        std::bind(&dlio::OdomNode::publishPose, this));
+  }
 
   this->T = Eigen::Matrix4f::Identity();
   this->T_prior = Eigen::Matrix4f::Identity();
@@ -187,6 +197,11 @@ void dlio::OdomNode::getParams() {
   dlio::declare_param(this, "frames/baselink", this->baselink_frame, "base_link");
   dlio::declare_param(this, "frames/lidar", this->lidar_frame, "lidar");
   dlio::declare_param(this, "frames/imu", this->imu_frame, "imu");
+
+  // The path/cloud/TF outputs are produced with each lidar update. The
+  // high-rate pose and odometry topics can be disabled by lightweight wrappers.
+  dlio::declare_param(this, "publish/pose_odom", this->publish_pose_odom_, true);
+  dlio::declare_param(this, "publish/keyframes", this->publish_keyframes_, true);
 
   // Deskew Flag
   dlio::declare_param(this, "pointcloud/deskew", this->deskew_, true);
@@ -1818,8 +1833,12 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
     this->keyframes[i].second = transformed_keyframe;
     this->keyframe_normals[i] = transformed_covariances;
 
-    this->publish_keyframe_thread = std::thread( &dlio::OdomNode::publishKeyframe, this, this->keyframes[i], this->keyframe_timestamps[i] );
-    this->publish_keyframe_thread.detach();
+    if (this->publish_keyframes_) {
+      this->publish_keyframe_thread = std::thread(
+          &dlio::OdomNode::publishKeyframe, this, this->keyframes[i],
+          this->keyframe_timestamps[i]);
+      this->publish_keyframe_thread.detach();
+    }
   }
 
   lock.unlock();

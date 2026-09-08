@@ -109,6 +109,8 @@ private:
   void debug();
 
   rclcpp::TimerBase::SharedPtr publish_timer;
+  bool publish_pose_odom_;
+  bool publish_keyframes_;
 
   // Subscribers
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;

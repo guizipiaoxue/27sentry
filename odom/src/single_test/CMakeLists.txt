@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(loop_closure REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters registration)
 find_package(Eigen3 REQUIRED)
@@ -35,7 +36,8 @@ target_link_libraries(single_lidar_odom
   Threads::Threads
   OpenMP::OpenMP_CXX)
 ament_target_dependencies(single_lidar_odom
-  rclcpp sensor_msgs nav_msgs geometry_msgs pcl_conversions tf2_ros pcl_ros)
+  rclcpp sensor_msgs nav_msgs geometry_msgs loop_closure pcl_conversions
+  tf2_ros pcl_ros)
 
 install(TARGETS single_lidar_odom DESTINATION lib/${PROJECT_NAME})
 

@@ -37,6 +37,20 @@ RViz 的 Fixed Frame 使用 `map`。优化地图发布在 `/mapping/map`，优�
 ros2 service call /mapping/save_map std_srvs/srv/Trigger '{}'
 ```
 
+`slam/src/map_ws/src/map.cpp` 同时提供与 DLIO 关键帧直接配合的 KD-tree 增量地图：
+
+- 原始里程计地图：`/dlio/kdtree_map`，Fixed Frame 使用 `odom`
+- 保存服务：`/dlio/save_kdtree_map`
+- 清空服务：`/dlio/clear_kdtree_map`
+- 参数文件：`slam/config/map.yaml`
+
+```bash
+ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'
+```
+
+KD-tree 地图用于低延迟增量显示和检查 DLIO 前端；`/mapping/map` 是经过回环优化
+并重新拼接关键帧的最终地图。
+
 回环检测、iSAM2 噪声、优化频率、地图降采样和保存路径统一配置在
 `odom/config/loop.yaml`。默认地图保存为启动目录下的
 `maps/optimized_map.pcd`。

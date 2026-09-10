@@ -1,0 +1,19 @@
+/**:
+  ros__parameters:
+    # DLIO keyframe clouds are already transformed into the odom frame.
+    map.frame: odom
+    map.strict_frame: true
+
+    # Downsample each keyframe, then use KD-tree nearest-neighbor rejection.
+    map.input_voxel_size: 0.15
+    map.min_point_spacing: 0.10
+    map.min_z: -1000.0
+    map.max_z: 1000.0
+    map.max_points: 5000000
+
+    # Publication can use a coarser cloud without changing the internal map.
+    map.publish_voxel_size: 0.20
+    map.publish_every_n_keyframes: 5
+
+    map.save_path: maps/dlio_kdtree_map.pcd
+    map.save_voxel_size: 0.10

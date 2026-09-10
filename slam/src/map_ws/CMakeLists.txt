@@ -5,11 +5,29 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# find dependencies
 find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common filters io kdtree)
+find_package(pcl_conversions REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+
+add_executable(kdtree_map src/map.cpp)
+target_compile_features(kdtree_map PRIVATE cxx_std_17)
+target_include_directories(kdtree_map PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(kdtree_map ${PCL_LIBRARIES})
+ament_target_dependencies(
+  kdtree_map
+  builtin_interfaces
+  pcl_conversions
+  rclcpp
+  sensor_msgs
+  std_srvs)
+
+install(TARGETS kdtree_map DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(FILES ../../config/map.yaml DESTINATION share/${PROJECT_NAME}/config)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

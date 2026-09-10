@@ -49,14 +49,14 @@ fi
 export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"
 
 LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
-DLIO_CONFIG="${DLIO_CONFIG:-${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/dlio.yaml}"
-DLIO_PARAMS="${DLIO_PARAMS:-${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/params.yaml}"
+ODOM_PARAMS="${ODOM_PARAMS:-${ROOT_DIR}/odom/config/odom.yaml}"
+LOOP_PARAMS="${LOOP_PARAMS:-${ROOT_DIR}/odom/config/loop.yaml}"
 LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
 DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
 FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
 IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
 
-for config_file in "${LIVOX_CONFIG}" "${DLIO_CONFIG}" "${DLIO_PARAMS}"; do
+for config_file in "${LIVOX_CONFIG}" "${ODOM_PARAMS}" "${LOOP_PARAMS}"; do
   if [[ ! -f "${config_file}" ]]; then
     echo "[start_odom] Missing configuration file: ${config_file}" >&2
     exit 1
@@ -66,7 +66,8 @@ done
 for package_executable in \
     "livox_ros_driver2 livox_ros_driver2_node" \
     "fusion_ws fusion_pcl" \
-    "odom_ws odom"; do
+    "odom_ws odom" \
+    "loop_closure loop_detector"; do
   read -r package executable <<<"${package_executable}"
   if ! ros2 pkg executables "${package}" | awk '{print $2}' | grep -Fxq "${executable}"; then
     echo "[start_odom] ${package}/${executable} is not built or not sourced." >&2
@@ -77,6 +78,7 @@ done
 DRIVER_PID=""
 FUSION_PID=""
 ODOM_PID=""
+LOOP_PID=""
 
 stop_process_group() {
   local pid="$1"
@@ -92,10 +94,12 @@ cleanup() {
   trap - EXIT INT TERM
 
   stop_process_group "${ODOM_PID}" TERM
+  stop_process_group "${LOOP_PID}" TERM
   stop_process_group "${FUSION_PID}" TERM
   stop_process_group "${DRIVER_PID}" TERM
   sleep 1
   stop_process_group "${ODOM_PID}" KILL
+  stop_process_group "${LOOP_PID}" KILL
   stop_process_group "${FUSION_PID}" KILL
   stop_process_group "${DRIVER_PID}" KILL
   wait 2>/dev/null || true
@@ -150,8 +154,7 @@ echo "[start_odom] Both IMUs calibrated."
 
 echo "[start_odom] Starting fused DLIO odometry..."
 setsid ros2 run odom_ws odom --ros-args \
-  --params-file "${DLIO_CONFIG}" \
-  --params-file "${DLIO_PARAMS}" \
+  --params-file "${ODOM_PARAMS}" \
   -r pointcloud:=/gimbal/cloud_fused \
   -r imu:=/gimbal/imu_fused \
   -r path:=/path \
@@ -159,17 +162,31 @@ setsid ros2 run odom_ws odom --ros-args \
   -p imu/calibration:=false \
   -p pointcloud/deskew:=false \
   -p odom/computeTimeOffset:=false \
-  -p publish/pose_odom:=false \
-  -p publish/keyframes:=false \
+  -p publish/pose_odom:=true \
+  -p publish/keyframes:=true \
   -p frames/odom:=odom \
   -p frames/baselink:=gimbal \
   -p frames/lidar:=fusion_lidar \
   -p frames/imu:=fusion_imu &
 ODOM_PID=$!
 
+sleep 1
+if ! kill -0 "${ODOM_PID}" 2>/dev/null; then
+  echo "[start_odom] DLIO odometry exited during startup." >&2
+  wait "${ODOM_PID}"
+fi
+
+echo "[start_odom] Starting Scan Context++ loop detector..."
+setsid ros2 run loop_closure loop_detector --ros-args \
+  --params-file "${LOOP_PARAMS}" \
+  -r keyframes:=/dlio/odom_node/keyframes \
+  -r keyframe_cloud:=/dlio/odom_node/pointcloud/keyframe \
+  -r loop_constraint:=/loop_closure/constraint &
+LOOP_PID=$!
+
 echo "[start_odom] Running. RViz Fixed Frame: odom"
-echo "[start_odom] Topics: /fusion_pcl, /path, /tf"
+echo "[start_odom] Topics: /fusion_pcl, /path, /loop_closure/constraint, /tf"
 echo "[start_odom] Press Ctrl+C to stop all nodes."
 
 # Returning when any child exits prevents a partially running pipeline.
-wait -n "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}"
+wait -n "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}"

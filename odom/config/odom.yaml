@@ -1,6 +1,8 @@
 /**:
   ros__parameters:
     use_sim_time: false
+    version: 1.1.1
+    adaptive: true
     frames/odom: odom
     frames/baselink: gimbal
     frames/lidar: fusion_lidar
@@ -10,9 +12,28 @@
     pointcloud/deskew: false
     pointcloud/voxelize: true
     imu/calibration: false
+    imu/intrinsics/accel/bias: [0.0, 0.0, 0.0]
+    imu/intrinsics/accel/sm: [1.0, 0.0, 0.0,
+                               0.0, 1.0, 0.0,
+                               0.0, 0.0, 1.0]
+    imu/intrinsics/gyro/bias: [0.0, 0.0, 0.0]
+    extrinsics/baselink2imu/t: [0.006253, -0.011775, 0.007645]
+    extrinsics/baselink2imu/R: [1.0, 0.0, 0.0,
+                                0.0, 1.0, 0.0,
+                                0.0, 0.0, 1.0]
+    extrinsics/baselink2lidar/t: [0.0, 0.0, 0.0]
+    extrinsics/baselink2lidar/R: [1.0, 0.0, 0.0,
+                                  0.0, 1.0, 0.0,
+                                  0.0, 0.0, 1.0]
     odom/computeTimeOffset: false
+    odom/gravity: 9.80665
+    odom/imu/approximateGravity: true
+    odom/imu/calibration/gyro: true
+    odom/imu/calibration/accel: true
+    odom/imu/calibration/time: 3.0
+    odom/imu/bufferSize: 5000
     odom/keyframe/threshD: 1.0
-    odom/keyframe/threshR: 15.0
+    odom/keyframe/threshR: 45.0
     odom/preprocessing/voxelFilter/res: 0.25
     odom/preprocessing/cropBoxFilter/size: 1.0
     odom/submap/keyframe/knn: 10
@@ -25,3 +46,10 @@
     odom/gicp/transformationEpsilon: 0.01
     odom/gicp/rotationEpsilon: 0.01
     odom/gicp/initLambdaFactor: 1.0e-9
+    odom/geo/Kp: 4.5
+    odom/geo/Kv: 11.25
+    odom/geo/Kq: 4.0
+    odom/geo/Kab: 2.25
+    odom/geo/Kgb: 1.0
+    odom/geo/abias_max: 5.0
+    odom/geo/gbias_max: 0.5

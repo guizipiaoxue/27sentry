@@ -1,0 +1,5 @@
+int32 current_index
+int32 matched_index
+geometry_msgs/Pose relative_pose
+float64 fitness
+float64 yaw_difference

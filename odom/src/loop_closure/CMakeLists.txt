@@ -7,13 +7,15 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters registration)
 find_package(Eigen3 REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LoopConstraint.msg"
-  DEPENDENCIES geometry_msgs
+  "msg/Keyframe.msg"
+  DEPENDENCIES geometry_msgs sensor_msgs builtin_interfaces
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} rosidl_typesupport_cpp)
 

@@ -17,6 +17,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(Threads REQUIRED)
+find_package(loop_closure REQUIRED)
 
 set(DLIO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../direct_lidar_inertial_odometry)
 
@@ -39,6 +40,7 @@ ament_target_dependencies(
   rclcpp
   sensor_msgs
   tf2_ros)
+ament_target_dependencies(odom loop_closure)
 
 install(TARGETS odom DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../config DESTINATION share/${PROJECT_NAME})

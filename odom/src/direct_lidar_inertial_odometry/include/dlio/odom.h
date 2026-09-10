@@ -20,6 +20,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include "loop_closure/msg/keyframe.hpp"
 #include <tf2_ros/transform_broadcaster.h>
 
 // BOOST
@@ -62,6 +63,8 @@ private:
   void publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud);
   void publishCloud(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud);
   void publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>,
+                       pcl::PointCloud<PointType>::ConstPtr> kf, rclcpp::Time timestamp);
+  void publishKeyframeBundle(int id, std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>,
                        pcl::PointCloud<PointType>::ConstPtr> kf, rclcpp::Time timestamp);
 
   void getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedPtr& pc);
@@ -123,6 +126,7 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr kf_pose_pub;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr kf_cloud_pub;
+  rclcpp::Publisher<loop_closure::msg::Keyframe>::SharedPtr keyframe_bundle_pub;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr deskewed_pub;
 
   // TF

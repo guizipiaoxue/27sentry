@@ -55,6 +55,8 @@ dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
         this->create_publisher<geometry_msgs::msg::PoseArray>("kf_pose", 1);
     this->kf_cloud_pub =
         this->create_publisher<sensor_msgs::msg::PointCloud2>("kf_cloud", 1);
+    this->keyframe_bundle_pub =
+        this->create_publisher<loop_closure::msg::Keyframe>("keyframe", 10);
   }
 
   this->br = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
@@ -504,6 +506,26 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
     this->kf_cloud_pub->publish(keyframe_cloud_ros);
   }
 
+}
+
+void dlio::OdomNode::publishKeyframeBundle(
+    int id,
+    std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>, pcl::PointCloud<PointType>::ConstPtr> kf,
+    rclcpp::Time timestamp) {
+  this->publishKeyframe(kf, timestamp);
+  loop_closure::msg::Keyframe msg;
+  msg.id = id;
+  msg.pose.position.x = kf.first.first[0];
+  msg.pose.position.y = kf.first.first[1];
+  msg.pose.position.z = kf.first.first[2];
+  msg.pose.orientation.w = kf.first.second.w();
+  msg.pose.orientation.x = kf.first.second.x();
+  msg.pose.orientation.y = kf.first.second.y();
+  msg.pose.orientation.z = kf.first.second.z();
+  pcl::toROSMsg(*kf.second, msg.cloud);
+  msg.cloud.header.stamp = timestamp;
+  msg.cloud.header.frame_id = this->odom_frame;
+  this->keyframe_bundle_pub->publish(msg);
 }
 
 void dlio::OdomNode::getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedPtr& pc) {
@@ -1835,7 +1857,7 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
 
     if (this->publish_keyframes_) {
       this->publish_keyframe_thread = std::thread(
-          &dlio::OdomNode::publishKeyframe, this, this->keyframes[i],
+          &dlio::OdomNode::publishKeyframeBundle, this, i, this->keyframes[i],
           this->keyframe_timestamps[i]);
       this->publish_keyframe_thread.detach();
     }

@@ -1,0 +1,41 @@
+#include <pybind11/eigen.h>
+#include <pybind11/stl_bind.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/operators.h>
+#include <pybind11/iostream.h>
+#include <pybind11/functional.h>
+#include "gtsam/base/serialization.h"
+#include "gtsam/base/utilities.h"  // for RedirectCout.
+
+{includes}
+
+{boost_class_export}
+
+#include "python/preamble.h"
+
+using namespace std;
+
+namespace py = pybind11;
+
+{submodules}
+
+{declaration_module_def} {{
+// Declaration specializations must only register Python types. Projects can
+// replace this include with their own per-generated-file declaration hook.
+#include "python/declarations/{module_name}.h"
+
+{wrapped_declarations}
+}}
+
+{binding_module_def} {{
+// Callable and property specializations belong in the binding phase.
+#include "python/specializations/{module_name}.h"
+
+{wrapped_bindings}
+}}
+
+{module_def} {{
+    m_.doc() = "pybind11 wrapper of {module_name}";
+
+{module_init}
+}}

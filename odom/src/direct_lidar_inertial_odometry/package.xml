@@ -24,6 +24,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>loop_closure</depend>
   <depend>pcl_ros</depend>
   <depend>rclcpp</depend>
   <exec_depend>rosidl_default_runtime</exec_depend>

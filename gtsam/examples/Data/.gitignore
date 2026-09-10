@@ -1,0 +1,3 @@
+*.txt
+# Keep upstream-tracked datasets visible when GTSAM is vendored without .git.
+!*.txt

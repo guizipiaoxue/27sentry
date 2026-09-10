@@ -11,8 +11,17 @@ def generate_launch_description():
             package='loop_closure', executable='loop_detector', name='loop_detector',
             output='screen', parameters=[params],
             remappings=[
-                ('keyframes', '/dlio/odom_node/keyframes'),
-                ('keyframe_cloud', '/dlio/odom_node/pointcloud/keyframe'),
+                ('keyframe', '/dlio/odom_node/keyframe'),
                 ('loop_constraint', '/loop_closure/constraint'),
-            ])
+            ]),
+        Node(
+            package='loop_closure', executable='pose_graph_backend',
+            name='pose_graph_backend', output='screen', parameters=[params],
+            remappings=[
+                ('keyframe', '/dlio/odom_node/keyframe'),
+                ('loop_constraint', '/loop_closure/constraint'),
+                ('optimized_path', '/mapping/optimized_path'),
+                ('map', '/mapping/map'),
+                ('save_map', '/mapping/save_map'),
+            ]),
     ])

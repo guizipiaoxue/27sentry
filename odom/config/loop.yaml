@@ -1,13 +1,34 @@
 /**:
   ros__parameters:
-    rings: 20
-    sectors: 60
-    max_radius: 80.0
-    voxel_size: 0.25
-    candidate_distance: 0.20
-    num_candidates: 5
-    exclusion_recent: 30
-    min_travel_distance: 10.0
-    icp_max_correspondence: 2.0
-    icp_iterations: 40
-    max_fitness: 0.35
+    # Scan Context loop candidate search followed by GICP verification.
+    detector.rings: 20
+    detector.sectors: 60
+    detector.max_radius: 80.0
+    detector.voxel_size: 0.25
+    detector.descriptor_threshold: 0.20
+    detector.num_candidates: 5
+    detector.exclusion_recent: 30
+    detector.min_travel_distance: 10.0
+    detector.icp_max_correspondence: 2.0
+    detector.icp_iterations: 40
+    detector.max_fitness: 0.35
+
+    # GTSAM Pose3/iSAM2 backend. Rotation sigmas are specified in degrees.
+    backend.map_frame: map
+    backend.odom_frame: odom
+    backend.prior_translation_sigma: 0.01
+    backend.prior_rotation_sigma_deg: 0.1
+    backend.odom_translation_sigma: 0.10
+    backend.odom_rotation_sigma_deg: 1.0
+    backend.loop_translation_sigma: 0.15
+    backend.loop_rotation_sigma_deg: 2.0
+    backend.loop_huber_scale: 1.345
+    backend.relinearize_threshold: 0.01
+    backend.relinearize_skip: 1
+    backend.optimization_iterations: 2
+
+    # Optimized map publication and std_srvs/Trigger save service.
+    backend.map_voxel_size: 0.20
+    backend.map_publish_every_n_keyframes: 5
+    backend.save_path: maps/optimized_map.pcd
+    backend.save_leaf_size: 0.10

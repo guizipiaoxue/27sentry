@@ -1,76 +1,282 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <mutex>
-#include <numeric>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <geometry_msgs/msg/pose_array.hpp>
+#include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/gicp.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/point_cloud2.hpp>
 
+#include "loop_closure/msg/keyframe.hpp"
 #include "loop_closure/msg/loop_constraint.hpp"
+
+namespace {
 
 using Point = pcl::PointXYZI;
 using Cloud = pcl::PointCloud<Point>;
 
+Eigen::Isometry3f poseToIsometry(const geometry_msgs::msg::Pose &pose) {
+  Eigen::Quaternionf rotation(
+      static_cast<float>(pose.orientation.w),
+      static_cast<float>(pose.orientation.x),
+      static_cast<float>(pose.orientation.y),
+      static_cast<float>(pose.orientation.z));
+  Eigen::Isometry3f transform = Eigen::Isometry3f::Identity();
+  transform.linear() = rotation.normalized().toRotationMatrix();
+  transform.translation() = Eigen::Vector3f(
+      static_cast<float>(pose.position.x), static_cast<float>(pose.position.y),
+      static_cast<float>(pose.position.z));
+  return transform;
+}
+
+geometry_msgs::msg::Pose isometryToPose(const Eigen::Isometry3f &transform) {
+  geometry_msgs::msg::Pose pose;
+  const Eigen::Quaternionf rotation(transform.linear());
+  pose.position.x = transform.translation().x();
+  pose.position.y = transform.translation().y();
+  pose.position.z = transform.translation().z();
+  pose.orientation.w = rotation.w();
+  pose.orientation.x = rotation.x();
+  pose.orientation.y = rotation.y();
+  pose.orientation.z = rotation.z();
+  return pose;
+}
+
+}  // namespace
+
 class LoopDetector final : public rclcpp::Node {
  public:
   LoopDetector() : Node("loop_detector") {
-    declare_parameter<int>("rings", 20); declare_parameter<int>("sectors", 60);
-    declare_parameter<double>("max_radius", 80.0); declare_parameter<double>("voxel_size", 0.25);
-    declare_parameter<double>("candidate_distance", 0.20); declare_parameter<int>("num_candidates", 5);
-    declare_parameter<int>("exclusion_recent", 30); declare_parameter<double>("min_travel_distance", 10.0);
-    declare_parameter<double>("icp_max_correspondence", 2.0); declare_parameter<int>("icp_iterations", 40);
-    declare_parameter<double>("max_fitness", 0.35);
-    rings_ = get_parameter("rings").as_int(); sectors_ = get_parameter("sectors").as_int();
-    max_radius_ = get_parameter("max_radius").as_double(); voxel_ = get_parameter("voxel_size").as_double();
-    candidate_distance_ = get_parameter("candidate_distance").as_double(); candidates_ = get_parameter("num_candidates").as_int();
-    exclusion_ = get_parameter("exclusion_recent").as_int(); min_travel_ = get_parameter("min_travel_distance").as_double();
-    max_corr_ = get_parameter("icp_max_correspondence").as_double(); icp_iter_ = get_parameter("icp_iterations").as_int(); max_fitness_ = get_parameter("max_fitness").as_double();
-    pose_sub_ = create_subscription<geometry_msgs::msg::PoseArray>("keyframes", 10, std::bind(&LoopDetector::poseCallback, this, std::placeholders::_1));
-    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>("keyframe_cloud", 10, std::bind(&LoopDetector::cloudCallback, this, std::placeholders::_1));
-    loop_pub_ = create_publisher<loop_closure::msg::LoopConstraint>("loop_constraint", 10);
+    rings_ = declare_parameter<int>("detector.rings", 20);
+    sectors_ = declare_parameter<int>("detector.sectors", 60);
+    max_radius_ = declare_parameter<double>("detector.max_radius", 80.0);
+    voxel_size_ = declare_parameter<double>("detector.voxel_size", 0.25);
+    descriptor_threshold_ =
+        declare_parameter<double>("detector.descriptor_threshold", 0.20);
+    num_candidates_ =
+        declare_parameter<int>("detector.num_candidates", 5);
+    exclusion_recent_ =
+        declare_parameter<int>("detector.exclusion_recent", 30);
+    min_travel_distance_ =
+        declare_parameter<double>("detector.min_travel_distance", 10.0);
+    icp_max_correspondence_ =
+        declare_parameter<double>("detector.icp_max_correspondence", 2.0);
+    icp_iterations_ =
+        declare_parameter<int>("detector.icp_iterations", 40);
+    max_fitness_ = declare_parameter<double>("detector.max_fitness", 0.35);
+
+    if (rings_ <= 0 || sectors_ <= 0 || voxel_size_ <= 0.0 ||
+        max_radius_ <= 0.0 || num_candidates_ <= 0) {
+      throw std::invalid_argument("invalid loop detector parameters");
+    }
+
+    keyframe_sub_ = create_subscription<loop_closure::msg::Keyframe>(
+        "keyframe", rclcpp::QoS(20).reliable(),
+        std::bind(&LoopDetector::keyframeCallback, this,
+                  std::placeholders::_1));
+    loop_pub_ = create_publisher<loop_closure::msg::LoopConstraint>(
+        "loop_constraint", rclcpp::QoS(10).reliable());
   }
 
  private:
-  struct Frame { geometry_msgs::msg::Pose pose; Cloud::Ptr cloud; Eigen::MatrixXf desc; Eigen::VectorXf ring; };
-  int rings_, sectors_, candidates_, exclusion_; double max_radius_, voxel_, candidate_distance_, min_travel_, max_corr_, max_fitness_; int icp_iter_;
-  geometry_msgs::msg::PoseArray::SharedPtr poses_; std::vector<Frame> frames_; std::mutex mutex_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr pose_sub_; rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_; rclcpp::Publisher<loop_closure::msg::LoopConstraint>::SharedPtr loop_pub_;
+  struct Frame {
+    int id;
+    geometry_msgs::msg::Pose pose;
+    Cloud::Ptr local_cloud;
+    Eigen::MatrixXf descriptor;
+    Eigen::VectorXf ring_key;
+  };
 
-  void poseCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg) { std::lock_guard<std::mutex> lock(mutex_); poses_ = msg; }
-  Eigen::MatrixXf descriptor(const Cloud& cloud) const {
-    Eigen::MatrixXf d = Eigen::MatrixXf::Constant(rings_, sectors_, -std::numeric_limits<float>::infinity());
-    for (const auto& p : cloud.points) {
-      const float r = std::hypot(p.x, p.y); if (r >= max_radius_ || r < 0.1f) continue;
-      int ri = std::min(rings_ - 1, static_cast<int>(r / max_radius_ * rings_));
-      float a = std::atan2(p.y, p.x); if (a < 0) a += 2.0f * static_cast<float>(M_PI);
-      int si = std::min(sectors_ - 1, static_cast<int>(a / (2.0f * M_PI) * sectors_)); d(ri, si) = std::max(d(ri, si), p.z);
+  Eigen::MatrixXf makeDescriptor(const Cloud &cloud) const {
+    Eigen::MatrixXf descriptor = Eigen::MatrixXf::Constant(
+        rings_, sectors_, -std::numeric_limits<float>::infinity());
+    for (const auto &point : cloud.points) {
+      const float radius = std::hypot(point.x, point.y);
+      if (radius >= max_radius_ || radius < 0.1F) {
+        continue;
+      }
+      const int ring = std::min(
+          rings_ - 1, static_cast<int>(radius / max_radius_ * rings_));
+      float angle = std::atan2(point.y, point.x);
+      if (angle < 0.0F) {
+        angle += 2.0F * static_cast<float>(M_PI);
+      }
+      const int sector = std::min(
+          sectors_ - 1,
+          static_cast<int>(angle / (2.0F * static_cast<float>(M_PI)) *
+                           sectors_));
+      descriptor(ring, sector) =
+          std::max(descriptor(ring, sector), point.z);
     }
-    for (int r = 0; r < rings_; ++r) for (int s = 0; s < sectors_; ++s) if (!std::isfinite(d(r,s))) d(r,s) = 0.0f;
-    return d;
+    for (int ring = 0; ring < rings_; ++ring) {
+      for (int sector = 0; sector < sectors_; ++sector) {
+        if (!std::isfinite(descriptor(ring, sector))) {
+          descriptor(ring, sector) = 0.0F;
+        }
+      }
+    }
+    return descriptor;
   }
-  Eigen::VectorXf ringKey(const Eigen::MatrixXf& d) const { return d.rowwise().mean(); }
-  double distance(const Eigen::MatrixXf& a, const Eigen::MatrixXf& b, int* best_shift) const {
-    double best = std::numeric_limits<double>::max(); int shift_best = 0;
-    for (int sh = 0; sh < sectors_; ++sh) { double sum = 0; int n = 0; for (int r=0;r<rings_;++r) for(int s=0;s<sectors_;++s) { double x=a(r,s), y=b(r,(s+sh)%sectors_); double den=std::abs(x)+std::abs(y); if(den>1e-3){sum += std::abs(x-y)/den; ++n;} } double v=n?sum/n:1e9; if(v<best){best=v;shift_best=sh;} }
-    if (best_shift) *best_shift = shift_best; return best;
+
+  double descriptorDistance(
+      const Eigen::MatrixXf &first, const Eigen::MatrixXf &second,
+      int *best_shift) const {
+    double best = std::numeric_limits<double>::max();
+    int selected_shift = 0;
+    for (int shift = 0; shift < sectors_; ++shift) {
+      double sum = 0.0;
+      int count = 0;
+      for (int ring = 0; ring < rings_; ++ring) {
+        for (int sector = 0; sector < sectors_; ++sector) {
+          const double lhs = first(ring, sector);
+          const double rhs = second(ring, (sector + shift) % sectors_);
+          const double denominator = std::abs(lhs) + std::abs(rhs);
+          if (denominator > 1e-3) {
+            sum += std::abs(lhs - rhs) / denominator;
+            ++count;
+          }
+        }
+      }
+      const double distance = count > 0 ? sum / count : 1e9;
+      if (distance < best) {
+        best = distance;
+        selected_shift = shift;
+      }
+    }
+    *best_shift = selected_shift;
+    return best;
   }
-  void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-    std::lock_guard<std::mutex> lock(mutex_); if (!poses_ || poses_->poses.size() <= frames_.size()) return;
-    Cloud::Ptr raw(new Cloud); pcl::fromROSMsg(*msg, *raw); Cloud::Ptr filtered(new Cloud); pcl::VoxelGrid<Point> vg; vg.setLeafSize(voxel_, voxel_, voxel_); vg.setInputCloud(raw); vg.filter(*filtered); if (filtered->empty()) return;
-    Frame f; f.pose = poses_->poses[frames_.size()]; f.cloud = filtered; f.desc = descriptor(*filtered); f.ring = ringKey(f.desc);
-    const int idx = static_cast<int>(frames_.size()); frames_.push_back(f); if (idx <= exclusion_) return;
-    double dist = 0; const auto& p = f.pose.position; for (int i=0;i<idx;i++) { double dx=p.x-frames_[i].pose.position.x,dy=p.y-frames_[i].pose.position.y; dist=std::max(dist,std::hypot(dx,dy)); } if (dist < min_travel_) return;
-    std::vector<std::pair<double,int>> ranked; for(int i=0;i<idx-exclusion_;++i) ranked.emplace_back((f.ring-frames_[i].ring).norm(),i); std::sort(ranked.begin(),ranked.end());
-    int tested=0; for (auto [rk, candidate] : ranked) { if (tested++ >= candidates_ || rk > candidate_distance_*10.0) break; int shift=0; double sc=distance(f.desc,frames_[candidate].desc,&shift); if(sc>candidate_distance_) continue; Eigen::Matrix4f guess=Eigen::Matrix4f::Identity(); float yaw=static_cast<float>(shift)*2.0f*static_cast<float>(M_PI)/sectors_; guess.block<3,3>(0,0)=Eigen::AngleAxisf(yaw,Eigen::Vector3f::UnitZ()).toRotationMatrix(); pcl::GeneralizedIterativeClosestPoint<Point,Point> gicp; gicp.setMaxCorrespondenceDistance(max_corr_); gicp.setMaximumIterations(icp_iter_); gicp.setInputSource(f.cloud); gicp.setInputTarget(frames_[candidate].cloud); Cloud aligned; gicp.align(aligned,guess); if(!gicp.hasConverged() || gicp.getFitnessScore()>max_fitness_) continue; loop_closure::msg::LoopConstraint out; out.current_index=idx; out.matched_index=candidate; Eigen::Matrix4f t=gicp.getFinalTransformation(); Eigen::Quaternionf q(t.block<3,3>(0,0)); out.relative_pose.position.x=t(0,3); out.relative_pose.position.y=t(1,3); out.relative_pose.position.z=t(2,3); out.relative_pose.orientation.w=q.w(); out.relative_pose.orientation.x=q.x(); out.relative_pose.orientation.y=q.y(); out.relative_pose.orientation.z=q.z(); out.fitness=gicp.getFitnessScore(); out.yaw_difference=yaw; loop_pub_->publish(out); RCLCPP_INFO(get_logger(),"loop closure %d <-> %d, score %.3f",idx,candidate,out.fitness); break; }
+
+  void keyframeCallback(
+      const loop_closure::msg::Keyframe::SharedPtr message) {
+    if (!frames_.empty() && message->id <= frames_.back().id) {
+      RCLCPP_WARN(get_logger(), "ignoring non-increasing keyframe id %d",
+                  message->id);
+      return;
+    }
+
+    Cloud::Ptr odom_cloud(new Cloud);
+    pcl::fromROSMsg(message->cloud, *odom_cloud);
+    if (odom_cloud->empty()) {
+      return;
+    }
+
+    Cloud::Ptr local_cloud(new Cloud);
+    pcl::transformPointCloud(
+        *odom_cloud, *local_cloud, poseToIsometry(message->pose).inverse());
+    Cloud::Ptr filtered(new Cloud);
+    pcl::VoxelGrid<Point> voxel_filter;
+    voxel_filter.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
+    voxel_filter.setInputCloud(local_cloud);
+    voxel_filter.filter(*filtered);
+    if (filtered->empty()) {
+      return;
+    }
+
+    Frame frame;
+    frame.id = message->id;
+    frame.pose = message->pose;
+    frame.local_cloud = filtered;
+    frame.descriptor = makeDescriptor(*filtered);
+    frame.ring_key = frame.descriptor.rowwise().mean();
+
+    const int current = static_cast<int>(frames_.size());
+    frames_.push_back(std::move(frame));
+    if (current <= exclusion_recent_) {
+      return;
+    }
+
+    const auto &current_frame = frames_.back();
+    const auto &current_position = current_frame.pose.position;
+    double maximum_travel = 0.0;
+    for (int index = 0; index < current; ++index) {
+      const auto &position = frames_[index].pose.position;
+      maximum_travel = std::max(
+          maximum_travel,
+          std::hypot(current_position.x - position.x,
+                     current_position.y - position.y));
+    }
+    if (maximum_travel < min_travel_distance_) {
+      return;
+    }
+
+    std::vector<std::pair<double, int>> ranked;
+    for (int index = 0; index < current - exclusion_recent_; ++index) {
+      ranked.emplace_back(
+          (current_frame.ring_key - frames_[index].ring_key).norm(), index);
+    }
+    std::sort(ranked.begin(), ranked.end());
+
+    int tested = 0;
+    for (const auto &[ring_distance, candidate] : ranked) {
+      if (tested++ >= num_candidates_ ||
+          ring_distance > descriptor_threshold_ * 10.0) {
+        break;
+      }
+      int shift = 0;
+      const double scan_context_distance = descriptorDistance(
+          current_frame.descriptor, frames_[candidate].descriptor, &shift);
+      if (scan_context_distance > descriptor_threshold_) {
+        continue;
+      }
+
+      const Eigen::Isometry3f odometry_guess =
+          poseToIsometry(frames_[candidate].pose).inverse() *
+          poseToIsometry(current_frame.pose);
+      pcl::GeneralizedIterativeClosestPoint<Point, Point> registration;
+      registration.setMaxCorrespondenceDistance(icp_max_correspondence_);
+      registration.setMaximumIterations(icp_iterations_);
+      registration.setInputSource(current_frame.local_cloud);
+      registration.setInputTarget(frames_[candidate].local_cloud);
+      Cloud aligned;
+      registration.align(aligned, odometry_guess.matrix());
+      if (!registration.hasConverged() ||
+          registration.getFitnessScore() > max_fitness_) {
+        continue;
+      }
+
+      loop_closure::msg::LoopConstraint output;
+      output.header = message->cloud.header;
+      output.current_index = current_frame.id;
+      output.matched_index = frames_[candidate].id;
+      output.relative_pose = isometryToPose(Eigen::Isometry3f(
+          registration.getFinalTransformation()));
+      output.fitness = registration.getFitnessScore();
+      output.yaw_difference = static_cast<double>(shift) * 2.0 * M_PI /
+                              static_cast<double>(sectors_);
+      loop_pub_->publish(output);
+      RCLCPP_INFO(get_logger(), "loop closure %d <-> %d, fitness %.3f",
+                  output.current_index, output.matched_index, output.fitness);
+      break;
+    }
   }
+
+  int rings_;
+  int sectors_;
+  int num_candidates_;
+  int exclusion_recent_;
+  int icp_iterations_;
+  double max_radius_;
+  double voxel_size_;
+  double descriptor_threshold_;
+  double min_travel_distance_;
+  double icp_max_correspondence_;
+  double max_fitness_;
+  std::vector<Frame> frames_;
+  rclcpp::Subscription<loop_closure::msg::Keyframe>::SharedPtr keyframe_sub_;
+  rclcpp::Publisher<loop_closure::msg::LoopConstraint>::SharedPtr loop_pub_;
 };
 
-int main(int argc, char** argv) { rclcpp::init(argc, argv); rclcpp::spin(std::make_shared<LoopDetector>()); rclcpp::shutdown(); return 0; }
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<LoopDetector>());
+  rclcpp::shutdown();
+  return 0;
+}

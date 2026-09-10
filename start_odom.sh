@@ -47,6 +47,9 @@ if [[ -z "${SDK_FOUND}" ]]; then
   exit 1
 fi
 export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"
+if [[ -d "/usr/local/lib" ]]; then
+  export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
+fi
 
 LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
 ODOM_PARAMS="${ODOM_PARAMS:-${ROOT_DIR}/odom/config/odom.yaml}"
@@ -67,7 +70,8 @@ for package_executable in \
     "livox_ros_driver2 livox_ros_driver2_node" \
     "fusion_ws fusion_pcl" \
     "odom_ws odom" \
-    "loop_closure loop_detector"; do
+    "loop_closure loop_detector" \
+    "loop_closure pose_graph_backend"; do
   read -r package executable <<<"${package_executable}"
   if ! ros2 pkg executables "${package}" | awk '{print $2}' | grep -Fxq "${executable}"; then
     echo "[start_odom] ${package}/${executable} is not built or not sourced." >&2
@@ -79,6 +83,7 @@ DRIVER_PID=""
 FUSION_PID=""
 ODOM_PID=""
 LOOP_PID=""
+BACKEND_PID=""
 
 stop_process_group() {
   local pid="$1"
@@ -93,11 +98,13 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM
 
+  stop_process_group "${BACKEND_PID}" TERM
   stop_process_group "${ODOM_PID}" TERM
   stop_process_group "${LOOP_PID}" TERM
   stop_process_group "${FUSION_PID}" TERM
   stop_process_group "${DRIVER_PID}" TERM
   sleep 1
+  stop_process_group "${BACKEND_PID}" KILL
   stop_process_group "${ODOM_PID}" KILL
   stop_process_group "${LOOP_PID}" KILL
   stop_process_group "${FUSION_PID}" KILL
@@ -152,6 +159,33 @@ if ! timeout "${IMU_CALIBRATION_TIMEOUT}" \
 fi
 echo "[start_odom] Both IMUs calibrated."
 
+echo "[start_odom] Starting Scan Context++ loop detector..."
+setsid ros2 run loop_closure loop_detector --ros-args \
+  --params-file "${LOOP_PARAMS}" \
+  -r keyframe:=/dlio/odom_node/keyframe \
+  -r loop_constraint:=/loop_closure/constraint &
+LOOP_PID=$!
+
+echo "[start_odom] Starting GTSAM iSAM2 mapping backend..."
+setsid ros2 run loop_closure pose_graph_backend --ros-args \
+  --params-file "${LOOP_PARAMS}" \
+  -r keyframe:=/dlio/odom_node/keyframe \
+  -r loop_constraint:=/loop_closure/constraint \
+  -r optimized_path:=/mapping/optimized_path \
+  -r map:=/mapping/map \
+  -r save_map:=/mapping/save_map &
+BACKEND_PID=$!
+
+sleep 1
+if ! kill -0 "${LOOP_PID}" 2>/dev/null; then
+  echo "[start_odom] Loop detector exited during startup." >&2
+  wait "${LOOP_PID}"
+fi
+if ! kill -0 "${BACKEND_PID}" 2>/dev/null; then
+  echo "[start_odom] GTSAM mapping backend exited during startup." >&2
+  wait "${BACKEND_PID}"
+fi
+
 echo "[start_odom] Starting fused DLIO odometry..."
 setsid ros2 run odom_ws odom --ros-args \
   --params-file "${ODOM_PARAMS}" \
@@ -159,6 +193,7 @@ setsid ros2 run odom_ws odom --ros-args \
   -r imu:=/gimbal/imu_fused \
   -r path:=/path \
   -r deskewed:=/fusion_pcl \
+  -r keyframe:=/dlio/odom_node/keyframe \
   -p imu/calibration:=false \
   -p pointcloud/deskew:=false \
   -p odom/computeTimeOffset:=false \
@@ -176,17 +211,10 @@ if ! kill -0 "${ODOM_PID}" 2>/dev/null; then
   wait "${ODOM_PID}"
 fi
 
-echo "[start_odom] Starting Scan Context++ loop detector..."
-setsid ros2 run loop_closure loop_detector --ros-args \
-  --params-file "${LOOP_PARAMS}" \
-  -r keyframes:=/dlio/odom_node/keyframes \
-  -r keyframe_cloud:=/dlio/odom_node/pointcloud/keyframe \
-  -r loop_constraint:=/loop_closure/constraint &
-LOOP_PID=$!
-
-echo "[start_odom] Running. RViz Fixed Frame: odom"
-echo "[start_odom] Topics: /fusion_pcl, /path, /loop_closure/constraint, /tf"
+echo "[start_odom] Running. RViz Fixed Frame: map"
+echo "[start_odom] Topics: /mapping/map, /mapping/optimized_path, /loop_closure/constraint, /tf"
+echo "[start_odom] Save map: ros2 service call /mapping/save_map std_srvs/srv/Trigger '{}'"
 echo "[start_odom] Press Ctrl+C to stop all nodes."
 
 # Returning when any child exits prevents a partially running pipeline.
-wait -n "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}"
+wait -n "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}" "${BACKEND_PID}"

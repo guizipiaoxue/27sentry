@@ -1,0 +1,19 @@
+__pycache__/
+.vscode/
+*build*
+*install*
+*dist*
+*.egg-info
+
+**/.DS_Store
+
+# Files related to code coverage stats
+**/.coverage
+
+gtwrap/matlab_wrapper/matlab_wrapper.tpl
+
+.python-version
+
+# Keep the upstream-tracked build fixture visible in the vendored source tree.
+!pybind11/tests/test_cmake_build/
+!pybind11/tests/test_cmake_build/**

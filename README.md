@@ -51,6 +51,12 @@ ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'
 KD-tree 地图用于低延迟增量显示和检查 DLIO 前端；`/mapping/map` 是经过回环优化
 并重新拼接关键帧的最终地图。
 
+只需要 DLIO 和 KD-tree 原始地图时，可以关闭 Scan Context++ 和 GTSAM 后端：
+
+```bash
+ENABLE_GTSAM=0 ./start_mapping.sh
+```
+
 回环检测、iSAM2 噪声、优化频率、地图降采样和保存路径统一配置在
 `odom/config/loop.yaml`。默认地图保存为启动目录下的
 `maps/optimized_map.pcd`。

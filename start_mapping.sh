@@ -7,6 +7,8 @@ ROOT_DIR="${SCRIPT_DIR}"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 SLAM_SETUP="${ROOT_DIR}/slam/install/setup.bash"
 MAP_PARAMS="${MAP_PARAMS:-${ROOT_DIR}/slam/config/map.yaml}"
+ENABLE_GTSAM="${ENABLE_GTSAM:-1}"
+export ENABLE_GTSAM
 
 for required_file in "${ROS_SETUP}" "${SLAM_SETUP}" "${MAP_PARAMS}"; do
   if [[ ! -f "${required_file}" ]]; then
@@ -66,12 +68,18 @@ if ! kill -0 "${MAP_PID}" 2>/dev/null; then
   wait "${MAP_PID}"
 fi
 
-echo "[start_mapping] Starting DLIO and GTSAM pipeline..."
+if [[ "${ENABLE_GTSAM}" == "1" ]]; then
+  echo "[start_mapping] Starting DLIO and GTSAM pipeline..."
+else
+  echo "[start_mapping] Starting DLIO pipeline without GTSAM..."
+fi
 setsid "${ROOT_DIR}/start_odom.sh" "$@" &
 PIPELINE_PID=$!
 
 echo "[start_mapping] Raw DLIO map: /dlio/kdtree_map"
-echo "[start_mapping] GTSAM optimized map: /mapping/map"
+if [[ "${ENABLE_GTSAM}" == "1" ]]; then
+  echo "[start_mapping] GTSAM optimized map: /mapping/map"
+fi
 echo "[start_mapping] Save KD map: ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'"
 echo "[start_mapping] Clear KD map: ros2 service call /dlio/clear_kdtree_map std_srvs/srv/Trigger '{}'"
 

@@ -6,7 +6,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
-find_package(builtin_interfaces REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters io kdtree)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -19,14 +18,13 @@ target_include_directories(kdtree_map PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(kdtree_map ${PCL_LIBRARIES})
 ament_target_dependencies(
   kdtree_map
-  builtin_interfaces
   pcl_conversions
   rclcpp
   sensor_msgs
   std_srvs)
 
 install(TARGETS kdtree_map DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(FILES ../../config/map.yaml DESTINATION share/${PROJECT_NAME}/config)
 
 if(BUILD_TESTING)

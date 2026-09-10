@@ -21,7 +21,6 @@ def generate_launch_description():
                 ('keyframe', '/dlio/odom_node/keyframe'),
                 ('loop_constraint', '/loop_closure/constraint'),
                 ('optimized_path', '/mapping/optimized_path'),
-                ('map', '/mapping/map'),
                 ('save_map', '/mapping/save_map'),
             ]),
     ])

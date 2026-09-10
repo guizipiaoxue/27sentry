@@ -776,6 +776,7 @@ void dlio::OdomNode::initializeInputTarget() {
 
   // keep history of keyframes
   this->keyframes.push_back(std::make_pair(std::make_pair(this->lidarPose.p, this->lidarPose.q), this->current_scan));
+  this->dense_keyframe_clouds.push_back(this->deskewed_scan);
   this->keyframe_timestamps.push_back(this->scan_header_stamp);
   this->keyframe_normals.push_back(this->gicp.getSourceCovariances());
   this->keyframe_transformations.push_back(this->T_corr);
@@ -1676,6 +1677,7 @@ void dlio::OdomNode::updateKeyframes() {
     // update keyframe vector
     std::unique_lock<decltype(this->keyframes_mutex)> lock(this->keyframes_mutex);
     this->keyframes.push_back(std::make_pair(std::make_pair(this->lidarPose.p, this->lidarPose.q), this->current_scan));
+    this->dense_keyframe_clouds.push_back(this->deskewed_scan);
     this->keyframe_timestamps.push_back(this->scan_header_stamp);
     this->keyframe_normals.push_back(this->gicp.getSourceCovariances());
     this->keyframe_transformations.push_back(this->T_corr);
@@ -1836,6 +1838,7 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
 
   for (int i = this->num_processed_keyframes; i < this->keyframes.size(); i++) {
     pcl::PointCloud<PointType>::ConstPtr raw_keyframe = this->keyframes[i].second;
+    pcl::PointCloud<PointType>::ConstPtr dense_keyframe = this->dense_keyframe_clouds[i];
     std::shared_ptr<const nano_gicp::CovarianceList> raw_covariances = this->keyframe_normals[i];
     Eigen::Matrix4f T = this->keyframe_transformations[i];
     lock.unlock();
@@ -1844,6 +1847,10 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
 
     pcl::PointCloud<PointType>::Ptr transformed_keyframe = std::make_shared<pcl::PointCloud<PointType>>();
     pcl::transformPointCloud (*raw_keyframe, *transformed_keyframe, T);
+    pcl::PointCloud<PointType>::Ptr transformed_dense_keyframe =
+      std::make_shared<pcl::PointCloud<PointType>>();
+    pcl::transformPointCloud(
+      *dense_keyframe, *transformed_dense_keyframe, T);
 
     std::shared_ptr<nano_gicp::CovarianceList> transformed_covariances (std::make_shared<nano_gicp::CovarianceList>(raw_covariances->size()));
     std::transform(raw_covariances->begin(), raw_covariances->end(), transformed_covariances->begin(),
@@ -1854,10 +1861,13 @@ void dlio::OdomNode::buildKeyframesAndSubmap(State vehicle_state) {
     lock.lock();
     this->keyframes[i].second = transformed_keyframe;
     this->keyframe_normals[i] = transformed_covariances;
+    auto published_keyframe = this->keyframes[i];
+    published_keyframe.second = transformed_dense_keyframe;
+    this->dense_keyframe_clouds[i].reset();
 
     if (this->publish_keyframes_) {
       this->publish_keyframe_thread = std::thread(
-          &dlio::OdomNode::publishKeyframeBundle, this, i, this->keyframes[i],
+          &dlio::OdomNode::publishKeyframeBundle, this, i, published_keyframe,
           this->keyframe_timestamps[i]);
       this->publish_keyframe_thread.detach();
     }

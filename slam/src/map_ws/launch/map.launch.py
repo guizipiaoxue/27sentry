@@ -17,7 +17,6 @@ def generate_launch_description():
             parameters=[params],
             remappings=[
                 ('keyframe', '/dlio/odom_node/pointcloud/keyframe'),
-                ('map', '/dlio/kdtree_map'),
                 ('save_map', '/dlio/save_kdtree_map'),
                 ('clear_map', '/dlio/clear_kdtree_map'),
             ],

@@ -34,6 +34,7 @@
     odom/imu/bufferSize: 5000
     odom/keyframe/threshD: 1.0
     odom/keyframe/threshR: 45.0
+    # Sparse scan used only for GICP odometry; mapping publishes a dense copy.
     odom/preprocessing/voxelFilter/res: 0.25
     odom/preprocessing/cropBoxFilter/size: 1.0
     odom/submap/keyframe/knn: 10

@@ -189,7 +189,6 @@ if [[ "${ENABLE_GTSAM}" == "1" ]]; then
     -r keyframe:=/dlio/odom_node/keyframe \
     -r loop_constraint:=/loop_closure/constraint \
     -r optimized_path:=/mapping/optimized_path \
-    -r map:=/mapping/map \
     -r save_map:=/mapping/save_map &
   BACKEND_PID=$!
 
@@ -235,8 +234,8 @@ fi
 
 echo "[start_odom] DLIO keyframe cloud: /dlio/odom_node/pointcloud/keyframe"
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
-  echo "[start_odom] GTSAM enabled. RViz Fixed Frame: map"
-  echo "[start_odom] Topics: /mapping/map, /mapping/optimized_path, /loop_closure/constraint, /tf"
+  echo "[start_odom] GTSAM enabled. Optimized map is written only on save."
+  echo "[start_odom] Topics: /mapping/optimized_path, /loop_closure/constraint, /tf"
   echo "[start_odom] Save map: ros2 service call /mapping/save_map std_srvs/srv/Trigger '{}'"
 else
   echo "[start_odom] GTSAM disabled. DLIO Fixed Frame: odom"

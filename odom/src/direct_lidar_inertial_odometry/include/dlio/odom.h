@@ -161,6 +161,9 @@ private:
   // Keyframes
   std::vector<std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>,
                         pcl::PointCloud<PointType>::ConstPtr>> keyframes;
+  // Dense scans are retained only until their corresponding keyframe is
+  // transformed and published; odometry and submaps continue using keyframes.
+  std::vector<pcl::PointCloud<PointType>::ConstPtr> dense_keyframe_clouds;
   std::vector<rclcpp::Time> keyframe_timestamps;
   std::vector<std::shared_ptr<const nano_gicp::CovarianceList>> keyframe_normals;
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>> keyframe_transformations;

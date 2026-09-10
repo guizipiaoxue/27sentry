@@ -4,18 +4,12 @@
     map.frame: odom
     map.strict_frame: true
 
-    # Downsample each keyframe, then use KD-tree nearest-neighbor rejection.
-    map.input_voxel_size: 0.15
-    map.min_point_spacing: 0.10
+    # Preserve dense keyframes. A 1 mm radius rejects numerical duplicates only.
+    map.min_point_spacing: 0.001
     map.min_z: -1000.0
     map.max_z: 1000.0
-    map.max_points: 5000000
-
-    # Publication can use a coarser cloud without changing the internal map.
-    map.publish_voxel_size: 0.20
-    map.publish_every_n_keyframes: 5
-    # Re-send the cached map so RViz opened later receives it (0 disables).
-    map.republish_rate_hz: 1.0
+    # Hard safety limit; 20 million PointXYZI values use about 320 MB before
+    # accounting for the KD-tree index and temporary insertion buffers.
+    map.max_points: 20000000
 
     map.save_path: maps/dlio_kdtree_map.pcd
-    map.save_voxel_size: 0.10

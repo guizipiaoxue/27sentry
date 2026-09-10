@@ -3,12 +3,20 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
+cd "${ROOT_DIR}"
 
 ROS_SETUP="/opt/ros/humble/setup.bash"
 SLAM_SETUP="${ROOT_DIR}/slam/install/setup.bash"
 MAP_PARAMS="${MAP_PARAMS:-${ROOT_DIR}/slam/config/map.yaml}"
 ENABLE_GTSAM="${ENABLE_GTSAM:-1}"
+AUTO_SAVE_MAPS="${AUTO_SAVE_MAPS:-1}"
+MAP_SAVE_TIMEOUT="${MAP_SAVE_TIMEOUT:-300}"
 export ENABLE_GTSAM
+
+if [[ "${AUTO_SAVE_MAPS}" != "0" && "${AUTO_SAVE_MAPS}" != "1" ]]; then
+  echo "[start_mapping] AUTO_SAVE_MAPS must be 0 or 1." >&2
+  exit 1
+fi
 
 for required_file in "${ROS_SETUP}" "${SLAM_SETUP}" "${MAP_PARAMS}"; do
   if [[ ! -f "${required_file}" ]]; then
@@ -30,6 +38,7 @@ fi
 
 MAP_PID=""
 PIPELINE_PID=""
+SAVE_REQUESTED=0
 
 stop_process_group() {
   local pid="$1"
@@ -40,9 +49,33 @@ stop_process_group() {
   fi
 }
 
+save_maps() {
+  echo "[start_mapping] Saving KD-tree map before shutdown..."
+  if ! timeout "${MAP_SAVE_TIMEOUT}" ros2 service call \
+      /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'; then
+    echo "[start_mapping] KD-tree map save failed or timed out." >&2
+  fi
+
+  if [[ "${ENABLE_GTSAM}" == "1" ]]; then
+    echo "[start_mapping] Saving GTSAM optimized map before shutdown..."
+    if ! timeout "${MAP_SAVE_TIMEOUT}" ros2 service call \
+        /mapping/save_map std_srvs/srv/Trigger '{}'; then
+      echo "[start_mapping] Optimized map save failed or timed out." >&2
+    fi
+  fi
+}
+
+request_shutdown() {
+  SAVE_REQUESTED=1
+  exit "$1"
+}
+
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
+  if [[ "${SAVE_REQUESTED}" == "1" && "${AUTO_SAVE_MAPS}" == "1" ]]; then
+    save_maps
+  fi
   stop_process_group "${PIPELINE_PID}" TERM
   stop_process_group "${MAP_PID}" TERM
   sleep 1
@@ -51,13 +84,14 @@ cleanup() {
   wait 2>/dev/null || true
   exit "${status}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'request_shutdown 130' INT
+trap 'request_shutdown 143' TERM
 
 echo "[start_mapping] Starting DLIO KD-tree map builder..."
 setsid ros2 run map_ws kdtree_map --ros-args \
   --params-file "${MAP_PARAMS}" \
   -r keyframe:=/dlio/odom_node/pointcloud/keyframe \
-  -r map:=/dlio/kdtree_map \
   -r save_map:=/dlio/save_kdtree_map \
   -r clear_map:=/dlio/clear_kdtree_map &
 MAP_PID=$!
@@ -76,12 +110,12 @@ fi
 setsid "${ROOT_DIR}/start_odom.sh" "$@" &
 PIPELINE_PID=$!
 
-echo "[start_mapping] Raw DLIO map: /dlio/kdtree_map"
-echo "[start_mapping] RViz: rviz2 -d ${ROOT_DIR}/slam/install/map_ws/share/map_ws/rviz/kdtree_map.rviz"
+echo "[start_mapping] Dense KD-tree map is held in memory until saved."
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
-  echo "[start_mapping] GTSAM optimized map: /mapping/map"
+  echo "[start_mapping] Dense GTSAM map is generated only when saved."
 fi
 echo "[start_mapping] Save KD map: ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'"
 echo "[start_mapping] Clear KD map: ros2 service call /dlio/clear_kdtree_map std_srvs/srv/Trigger '{}'"
+echo "[start_mapping] Ctrl+C will save available maps before stopping."
 
 wait -n "${MAP_PID}" "${PIPELINE_PID}"

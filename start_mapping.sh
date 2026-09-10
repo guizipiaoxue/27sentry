@@ -77,6 +77,7 @@ setsid "${ROOT_DIR}/start_odom.sh" "$@" &
 PIPELINE_PID=$!
 
 echo "[start_mapping] Raw DLIO map: /dlio/kdtree_map"
+echo "[start_mapping] RViz: rviz2 -d ${ROOT_DIR}/slam/install/map_ws/share/map_ws/rviz/kdtree_map.rviz"
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   echo "[start_mapping] GTSAM optimized map: /mapping/map"
 fi

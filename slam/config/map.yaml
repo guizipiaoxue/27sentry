@@ -14,6 +14,8 @@
     # Publication can use a coarser cloud without changing the internal map.
     map.publish_voxel_size: 0.20
     map.publish_every_n_keyframes: 5
+    # Re-send the cached map so RViz opened later receives it (0 disables).
+    map.republish_rate_hz: 1.0
 
     map.save_path: maps/dlio_kdtree_map.pcd
     map.save_voxel_size: 0.10

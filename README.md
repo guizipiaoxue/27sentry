@@ -43,9 +43,11 @@ ros2 service call /mapping/save_map std_srvs/srv/Trigger '{}'
 - 保存服务：`/dlio/save_kdtree_map`
 - 清空服务：`/dlio/clear_kdtree_map`
 - 参数文件：`slam/config/map.yaml`
+- RViz 配置：`slam/src/map_ws/rviz/kdtree_map.rviz`
 
 ```bash
 ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'
+rviz2 -d "$(ros2 pkg prefix map_ws)/share/map_ws/rviz/kdtree_map.rviz"
 ```
 
 KD-tree 地图用于低延迟增量显示和检查 DLIO 前端；`/mapping/map` 是经过回环优化

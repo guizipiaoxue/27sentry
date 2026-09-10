@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +44,8 @@ public:
       declare_parameter<double>("map.publish_voxel_size", 0.20);
     publish_every_n_keyframes_ =
       declare_parameter<int>("map.publish_every_n_keyframes", 5);
+    republish_rate_hz_ =
+      declare_parameter<double>("map.republish_rate_hz", 1.0);
     max_points_ = declare_parameter<std::int64_t>("map.max_points", 5000000);
     min_z_ = declare_parameter<double>("map.min_z", -1000.0);
     max_z_ = declare_parameter<double>("map.max_z", 1000.0);
@@ -70,6 +73,11 @@ public:
       "clear_map", std::bind(
         &KdTreeMapNode::clearMap, this,
         std::placeholders::_1, std::placeholders::_2));
+    if (republish_rate_hz_ > 0.0) {
+      republish_timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / republish_rate_hz_),
+        std::bind(&KdTreeMapNode::republishMap, this));
+    }
 
     RCLCPP_INFO(
       get_logger(),
@@ -136,13 +144,15 @@ private:
     const bool finite_sizes = std::isfinite(input_voxel_size_) &&
       std::isfinite(min_point_spacing_) &&
       std::isfinite(publish_voxel_size_) &&
+      std::isfinite(republish_rate_hz_) &&
       std::isfinite(save_voxel_size_);
     const bool finite_height_range = std::isfinite(min_z_) &&
       std::isfinite(max_z_);
     if (map_frame_.empty() || !finite_sizes || !finite_height_range ||
       input_voxel_size_ <= 0.0 ||
       min_point_spacing_ <= 0.0 || publish_voxel_size_ < 0.0 ||
-      publish_every_n_keyframes_ <= 0 || max_points_ <= 0 ||
+      publish_every_n_keyframes_ <= 0 || republish_rate_hz_ < 0.0 ||
+      max_points_ <= 0 ||
       max_points_ > std::numeric_limits<std::uint32_t>::max() ||
       min_z_ >= max_z_ || save_path_.empty() || save_voxel_size_ < 0.0)
     {
@@ -294,11 +304,21 @@ private:
   void publishMap(const builtin_interfaces::msg::Time & stamp)
   {
     const Cloud::Ptr output = filteredMap(publish_voxel_size_);
-    sensor_msgs::msg::PointCloud2 message;
-    pcl::toROSMsg(*output, message);
-    message.header.frame_id = map_frame_;
-    message.header.stamp = stamp;
-    map_pub_->publish(message);
+    pcl::toROSMsg(*output, cached_map_message_);
+    cached_map_message_.header.frame_id = map_frame_;
+    cached_map_message_.header.stamp = stamp;
+    has_cached_map_ = true;
+    map_pub_->publish(cached_map_message_);
+  }
+
+  void republishMap()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!has_cached_map_) {
+      return;
+    }
+    cached_map_message_.header.stamp = now();
+    map_pub_->publish(cached_map_message_);
   }
 
   void saveMap(
@@ -355,6 +375,7 @@ private:
   double min_point_spacing_;
   double publish_voxel_size_;
   int publish_every_n_keyframes_;
+  double republish_rate_hz_;
   std::int64_t max_points_;
   double min_z_;
   double max_z_;
@@ -366,10 +387,13 @@ private:
   pcl::KdTreeFLANN<Point>::Ptr kdtree_;
   std::size_t keyframe_count_ = 0;
   bool map_limit_reported_ = false;
+  bool has_cached_map_ = false;
+  sensor_msgs::msg::PointCloud2 cached_map_message_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_service_;
+  rclcpp::TimerBase::SharedPtr republish_timer_;
 };
 
 int main(int argc, char ** argv)

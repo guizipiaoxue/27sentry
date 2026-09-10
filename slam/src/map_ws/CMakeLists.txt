@@ -26,7 +26,7 @@ ament_target_dependencies(
   std_srvs)
 
 install(TARGETS kdtree_map DESTINATION lib/${PROJECT_NAME})
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch rviz DESTINATION share/${PROJECT_NAME})
 install(FILES ../../config/map.yaml DESTINATION share/${PROJECT_NAME}/config)
 
 if(BUILD_TESTING)

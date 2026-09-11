@@ -104,31 +104,52 @@ BACKEND_PID=""
 stop_process_group() {
   local pid="$1"
   local signal="$2"
-  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-    kill "-${signal}" -- "-${pid}" 2>/dev/null ||
-      kill "-${signal}" "${pid}" 2>/dev/null || true
+  if [[ -z "${pid}" ]]; then
+    return
   fi
+
+  if kill -0 -- "-${pid}" 2>/dev/null; then
+    kill "-${signal}" -- "-${pid}" 2>/dev/null || true
+  elif kill -0 "${pid}" 2>/dev/null; then
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+  fi
+}
+
+stop_all_processes() {
+  local signal="$1"
+  stop_process_group "${BACKEND_PID}" "${signal}"
+  stop_process_group "${ODOM_PID}" "${signal}"
+  stop_process_group "${LOOP_PID}" "${signal}"
+  stop_process_group "${FUSION_PID}" "${signal}"
+  stop_process_group "${DRIVER_PID}" "${signal}"
+}
+
+force_cleanup() {
+  local status="$1"
+  trap - EXIT
+  trap '' INT TERM
+  printf '\n[start_odom] Forced shutdown requested; killing all nodes.\n' >&2
+  stop_all_processes KILL
+  wait 2>/dev/null || true
+  exit "${status}"
 }
 
 cleanup() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT
+  trap 'force_cleanup 130' INT
+  trap 'force_cleanup 143' TERM
 
-  stop_process_group "${BACKEND_PID}" TERM
-  stop_process_group "${ODOM_PID}" TERM
-  stop_process_group "${LOOP_PID}" TERM
-  stop_process_group "${FUSION_PID}" TERM
-  stop_process_group "${DRIVER_PID}" TERM
+  printf '\n[start_odom] Stopping all nodes...\n' >&2
+  stop_all_processes TERM
   sleep 1
-  stop_process_group "${BACKEND_PID}" KILL
-  stop_process_group "${ODOM_PID}" KILL
-  stop_process_group "${LOOP_PID}" KILL
-  stop_process_group "${FUSION_PID}" KILL
-  stop_process_group "${DRIVER_PID}" KILL
+  stop_all_processes KILL
   wait 2>/dev/null || true
   exit "${status}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DRIVER_ARGS=(
   ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args

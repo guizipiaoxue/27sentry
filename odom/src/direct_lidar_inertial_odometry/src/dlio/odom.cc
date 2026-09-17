@@ -13,7 +13,9 @@
 #include "dlio/odom.h"
 #include "dlio/utils.h"
 
+#include <algorithm>
 #include <queue>
+#include <stdexcept>
 
 #include "rclcpp/qos.hpp"
 
@@ -282,6 +284,22 @@ void dlio::OdomNode::getParams() {
   dlio::declare_param(this, "imu/calibration", this->imu_calibrate_, true);
   dlio::declare_param(this, "imu/intrinsics/accel/bias", prior_accel_bias, accel_default);
   dlio::declare_param(this, "imu/intrinsics/gyro/bias", prior_gyro_bias, gyro_default);
+
+  // A stationary detector suppresses residual IMU noise after bias removal.
+  // It is disabled by default so the upstream DLIO behavior is unchanged.
+  dlio::declare_param(this, "odom/imu/deadband/enabled", this->imu_deadband_enabled_, false);
+  dlio::declare_param(this, "odom/imu/deadband/accel", this->imu_accel_deadband_, 0.08);
+  dlio::declare_param(this, "odom/imu/deadband/gyro", this->imu_gyro_deadband_, 0.005);
+  dlio::declare_param(this, "odom/imu/deadband/stationarySamples", this->imu_stationary_samples_, 20);
+  dlio::declare_param(this, "odom/imu/deadband/position", this->stationary_position_deadband_, 0.01);
+  dlio::declare_param(this, "odom/imu/deadband/orientationDeg", this->stationary_orientation_deadband_deg_, 0.15);
+
+  if (this->imu_accel_deadband_ < 0.0 || this->imu_gyro_deadband_ < 0.0 ||
+      this->imu_stationary_samples_ <= 0 ||
+      this->stationary_position_deadband_ < 0.0 ||
+      this->stationary_orientation_deadband_deg_ < 0.0) {
+    throw std::invalid_argument("invalid IMU deadband parameters");
+  }
 
   // scale-misalignment matrix
   std::vector<double> imu_sm_default{1., 0., 0., 0., 1., 0., 0., 0., 1.};
@@ -1043,8 +1061,41 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
     this->imu_meas.dt = dt;
     this->prev_imu_stamp = this->imu_meas.stamp;
 
-    Eigen::Vector3f lin_accel_corrected = (this->imu_accel_sm_ * lin_accel) - this->state.b.accel;
-    Eigen::Vector3f ang_vel_corrected = ang_vel - this->state.b.gyro;
+    Eigen::Vector3f lin_accel_corrected;
+    Eigen::Vector3f ang_vel_corrected;
+    Eigen::Vector3f gravity_body;
+    {
+      std::lock_guard<std::mutex> lock(this->geo.mtx);
+      lin_accel_corrected =
+        (this->imu_accel_sm_ * lin_accel) - this->state.b.accel;
+      ang_vel_corrected = ang_vel - this->state.b.gyro;
+      if (this->imu_deadband_enabled_) {
+        gravity_body = this->state.q.conjugate()._transformVector(
+          Eigen::Vector3f(0.0F, 0.0F, static_cast<float>(this->gravity_)));
+      }
+    }
+
+    if (this->imu_deadband_enabled_) {
+      const Eigen::Vector3f accel_residual = lin_accel_corrected - gravity_body;
+      const double hysteresis = this->imu_stationary_.load() ? 1.5 : 1.0;
+      const bool stationary_sample =
+        accel_residual.norm() <= hysteresis * this->imu_accel_deadband_ &&
+        ang_vel_corrected.norm() <= hysteresis * this->imu_gyro_deadband_;
+
+      if (stationary_sample) {
+        this->imu_stationary_count_ = std::min(
+          this->imu_stationary_count_ + 1, this->imu_stationary_samples_);
+      } else {
+        this->imu_stationary_count_ = 0;
+        this->imu_stationary_.store(false);
+      }
+
+      if (this->imu_stationary_count_ >= this->imu_stationary_samples_) {
+        this->imu_stationary_.store(true);
+        lin_accel_corrected = gravity_body;
+        ang_vel_corrected.setZero();
+      }
+    }
 
     this->imu_meas.lin_accel = lin_accel_corrected;
     this->imu_meas.ang_vel = ang_vel_corrected;
@@ -1335,6 +1386,14 @@ void dlio::OdomNode::propagateState() {
   // Lock thread to prevent state from being accessed by UpdateState
   std::lock_guard<std::mutex> lock( this->geo.mtx );
 
+  if (this->imu_deadband_enabled_ && this->imu_stationary_.load()) {
+    this->state.v.lin.b.setZero();
+    this->state.v.lin.w.setZero();
+    this->state.v.ang.b.setZero();
+    this->state.v.ang.w.setZero();
+    return;
+  }
+
   double dt = this->imu_meas.dt;
 
   Eigen::Quaternionf qhat = this->state.q, omega;
@@ -1396,6 +1455,21 @@ void dlio::OdomNode::updateState() {
   Eigen::Vector3f err = pin - this->state.p;
   Eigen::Vector3f err_body;
 
+  bool suppress_position_correction = false;
+  bool suppress_orientation_correction = false;
+  if (this->imu_deadband_enabled_ && this->imu_stationary_.load()) {
+    suppress_position_correction =
+      err.norm() < this->stationary_position_deadband_;
+    const double orientation_error = 2.0 * std::acos(
+      std::clamp(std::abs(static_cast<double>(qe.w())), 0.0, 1.0));
+    suppress_orientation_correction =
+      orientation_error <
+      this->stationary_orientation_deadband_deg_ * M_PI / 180.0;
+  }
+  if (suppress_position_correction) {
+    err.setZero();
+  }
+
   err_body = qhat.conjugate()._transformVector(err);
 
   double abias_max = this->geo_abias_max_;
@@ -1406,20 +1480,24 @@ void dlio::OdomNode::updateState() {
   this->state.b.accel = this->state.b.accel.array().min(abias_max).max(-abias_max);
 
   // Update gyro bias
-  this->state.b.gyro[0] -= dt * this->geo_Kgb_ * qe.w() * qe.x();
-  this->state.b.gyro[1] -= dt * this->geo_Kgb_ * qe.w() * qe.y();
-  this->state.b.gyro[2] -= dt * this->geo_Kgb_ * qe.w() * qe.z();
+  if (!suppress_orientation_correction) {
+    this->state.b.gyro[0] -= dt * this->geo_Kgb_ * qe.w() * qe.x();
+    this->state.b.gyro[1] -= dt * this->geo_Kgb_ * qe.w() * qe.y();
+    this->state.b.gyro[2] -= dt * this->geo_Kgb_ * qe.w() * qe.z();
+  }
   this->state.b.gyro = this->state.b.gyro.array().min(gbias_max).max(-gbias_max);
 
   // Update state
   this->state.p += dt * this->geo_Kp_ * err;
   this->state.v.lin.w += dt * this->geo_Kv_ * err;
 
-  this->state.q.w() += dt * this->geo_Kq_ * qcorr.w();
-  this->state.q.x() += dt * this->geo_Kq_ * qcorr.x();
-  this->state.q.y() += dt * this->geo_Kq_ * qcorr.y();
-  this->state.q.z() += dt * this->geo_Kq_ * qcorr.z();
-  this->state.q.normalize();
+  if (!suppress_orientation_correction) {
+    this->state.q.w() += dt * this->geo_Kq_ * qcorr.w();
+    this->state.q.x() += dt * this->geo_Kq_ * qcorr.x();
+    this->state.q.y() += dt * this->geo_Kq_ * qcorr.y();
+    this->state.q.z() += dt * this->geo_Kq_ * qcorr.z();
+    this->state.q.normalize();
+  }
 
   // store previous pose, orientation, and velocity
   this->geo.prev_p = this->state.p;

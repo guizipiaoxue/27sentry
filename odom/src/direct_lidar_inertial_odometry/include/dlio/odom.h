@@ -356,6 +356,15 @@ private:
   int imu_buffer_size_;
   Eigen::Matrix3f imu_accel_sm_;
 
+  bool imu_deadband_enabled_;
+  double imu_accel_deadband_;
+  double imu_gyro_deadband_;
+  int imu_stationary_samples_;
+  double stationary_position_deadband_;
+  double stationary_orientation_deadband_deg_;
+  int imu_stationary_count_ = 0;
+  std::atomic<bool> imu_stationary_{false};
+
   int gicp_min_num_points_;
   int gicp_k_correspondences_;
   double gicp_max_corr_dist_;

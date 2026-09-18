@@ -4,6 +4,74 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
 
+usage() {
+  cat <<'EOF'
+Usage: ./start_odom.sh [OPTIONS]
+
+Start the dual-Livox, dual-IMU fusion pipeline with the selected odometry.
+
+Options:
+  -a, --algorithm ALGORITHM  Odometry algorithm: dlio or plio (default: dlio)
+  -h, --help                 Show this help message
+
+The default can also be set with ODOM_ALGORITHM=dlio|plio.
+EOF
+}
+
+ODOM_ALGORITHM="${ODOM_ALGORITHM:-dlio}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--algorithm)
+      if [[ $# -lt 2 ]]; then
+        echo "[start_odom] $1 requires an algorithm name." >&2
+        usage >&2
+        exit 2
+      fi
+      ODOM_ALGORITHM="$2"
+      shift 2
+      ;;
+    --algorithm=*)
+      ODOM_ALGORITHM="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "[start_odom] Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ $# -gt 0 ]]; then
+  echo "[start_odom] Unexpected positional argument: $1" >&2
+  usage >&2
+  exit 2
+fi
+
+case "${ODOM_ALGORITHM,,}" in
+  dlio)
+    ODOM_ALGORITHM="dlio"
+    ODOM_NAME="DLIO"
+    ;;
+  plio|point-lio|point_lio)
+    ODOM_ALGORITHM="plio"
+    ODOM_NAME="Point-LIO"
+    ;;
+  *)
+    echo "[start_odom] Unsupported algorithm: ${ODOM_ALGORITHM}" >&2
+    echo "[start_odom] Choose dlio or plio." >&2
+    exit 2
+    ;;
+esac
+
 ROS_SETUP="/opt/ros/humble/setup.bash"
 LIVOX_SETUP="${ROOT_DIR}/livox/install/setup.bash"
 SLAM_SETUP="${ROOT_DIR}/slam/install/setup.bash"
@@ -52,7 +120,11 @@ if [[ -d "/usr/local/lib" ]]; then
 fi
 
 LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
-ODOM_PARAMS="${ODOM_PARAMS:-${ROOT_DIR}/odom/config/odom.yaml}"
+if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
+  ODOM_PARAMS="${ODOM_PARAMS:-${ROOT_DIR}/odom/config/odom.yaml}"
+else
+  ODOM_PARAMS="${ODOM_PARAMS:-${ROOT_DIR}/odom/src/plio/config/point_lio.yaml}"
+fi
 LOOP_PARAMS="${LOOP_PARAMS:-${ROOT_DIR}/odom/config/loop.yaml}"
 ENABLE_GTSAM="${ENABLE_GTSAM:-1}"
 LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
@@ -63,6 +135,11 @@ IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
 if [[ "${ENABLE_GTSAM}" != "0" && "${ENABLE_GTSAM}" != "1" ]]; then
   echo "[start_odom] ENABLE_GTSAM must be 0 or 1." >&2
   exit 1
+fi
+if [[ "${ODOM_ALGORITHM}" == "plio" && "${ENABLE_GTSAM}" == "1" ]]; then
+  echo "[start_odom] Point-LIO does not publish the DLIO keyframe topics required by GTSAM." >&2
+  echo "[start_odom] GTSAM is disabled for this run." >&2
+  ENABLE_GTSAM="0"
 fi
 
 CONFIG_FILES=("${LIVOX_CONFIG}" "${ODOM_PARAMS}")
@@ -79,8 +156,12 @@ done
 REQUIRED_EXECUTABLES=(
   "livox_ros_driver2 livox_ros_driver2_node"
   "fusion_ws fusion_pcl"
-  "odom_ws odom"
 )
+if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
+  REQUIRED_EXECUTABLES+=("odom_ws odom")
+else
+  REQUIRED_EXECUTABLES+=("plio point_lio")
+fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   REQUIRED_EXECUTABLES+=(
     "loop_closure loop_detector"
@@ -224,42 +305,57 @@ if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   fi
 fi
 
-echo "[start_odom] Starting fused DLIO odometry..."
-setsid ros2 run odom_ws odom --ros-args \
-  --params-file "${ODOM_PARAMS}" \
-  -r pointcloud:=/gimbal/cloud_fused \
-  -r imu:=/gimbal/imu_fused \
-  -r path:=/path \
-  -r pose:=/dlio/odom_node/pose \
-  -r odom:=/dlio/odom_node/odom \
-  -r kf_pose:=/dlio/odom_node/keyframes \
-  -r kf_cloud:=/dlio/odom_node/pointcloud/keyframe \
-  -r deskewed:=/fusion_pcl \
-  -r keyframe:=/dlio/odom_node/keyframe \
-  -p imu/calibration:=false \
-  -p pointcloud/deskew:=false \
-  -p odom/computeTimeOffset:=false \
-  -p publish/pose_odom:=true \
-  -p publish/keyframes:=true \
-  -p frames/odom:=odom \
-  -p frames/baselink:=gimbal \
-  -p frames/lidar:=fusion_lidar \
-  -p frames/imu:=fusion_imu &
+echo "[start_odom] Starting fused ${ODOM_NAME} odometry..."
+if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
+  setsid ros2 run odom_ws odom --ros-args \
+    --params-file "${ODOM_PARAMS}" \
+    -r pointcloud:=/gimbal/cloud_fused \
+    -r imu:=/gimbal/imu_fused \
+    -r path:=/path \
+    -r pose:=/dlio/odom_node/pose \
+    -r odom:=/dlio/odom_node/odom \
+    -r kf_pose:=/dlio/odom_node/keyframes \
+    -r kf_cloud:=/dlio/odom_node/pointcloud/keyframe \
+    -r deskewed:=/fusion_pcl \
+    -r keyframe:=/dlio/odom_node/keyframe \
+    -p imu/calibration:=false \
+    -p pointcloud/deskew:=false \
+    -p odom/computeTimeOffset:=false \
+    -p publish/pose_odom:=true \
+    -p publish/keyframes:=true \
+    -p frames/odom:=odom \
+    -p frames/baselink:=gimbal \
+    -p frames/lidar:=fusion_lidar \
+    -p frames/imu:=fusion_imu &
+else
+  setsid ros2 run plio point_lio --ros-args \
+    --params-file "${ODOM_PARAMS}" \
+    -r pointcloud:=/gimbal/cloud_fused \
+    -r imu:=/gimbal/imu_fused \
+    -r odom:=/point_lio/odom \
+    -r path:=/path \
+    -r registered:=/cloud_registered \
+    -r registered_body:=/cloud_registered_body &
+fi
 ODOM_PID=$!
 
 sleep 1
 if ! kill -0 "${ODOM_PID}" 2>/dev/null; then
-  echo "[start_odom] DLIO odometry exited during startup." >&2
+  echo "[start_odom] ${ODOM_NAME} odometry exited during startup." >&2
   wait "${ODOM_PID}"
 fi
 
-echo "[start_odom] DLIO keyframe cloud: /dlio/odom_node/pointcloud/keyframe"
+if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
+  echo "[start_odom] DLIO keyframe cloud: /dlio/odom_node/pointcloud/keyframe"
+else
+  echo "[start_odom] Point-LIO topics: /point_lio/odom, /path, /cloud_registered"
+fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   echo "[start_odom] GTSAM enabled. Optimized map is written only on save."
   echo "[start_odom] Topics: /mapping/optimized_path, /loop_closure/constraint, /tf"
   echo "[start_odom] Save map: ros2 service call /mapping/save_map std_srvs/srv/Trigger '{}'"
 else
-  echo "[start_odom] GTSAM disabled. DLIO Fixed Frame: odom"
+  echo "[start_odom] GTSAM disabled. ${ODOM_NAME} Fixed Frame: odom"
 fi
 echo "[start_odom] Press Ctrl+C to stop all nodes."
 

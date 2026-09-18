@@ -32,14 +32,6 @@
     odom/imu/calibration/accel: true
     odom/imu/calibration/time: 3.0
     odom/imu/bufferSize: 5000
-    # Suppress residual fused-IMU noise while the platform is stationary.
-    # Acceleration is compared after removing the expected gravity vector.
-    odom/imu/deadband/enabled: true
-    odom/imu/deadband/accel: 0.08
-    odom/imu/deadband/gyro: 0.005
-    odom/imu/deadband/stationarySamples: 20
-    odom/imu/deadband/position: 0.01
-    odom/imu/deadband/orientationDeg: 0.15
     odom/keyframe/threshD: 1.0
     odom/keyframe/threshR: 45.0
     # Sparse scan used only for GICP odometry; mapping publishes a dense copy.

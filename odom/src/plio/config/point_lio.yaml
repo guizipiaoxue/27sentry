@@ -1,0 +1,32 @@
+/**:
+  ros__parameters:
+    frames.world: odom
+    frames.body: gimbal
+    publish.tf: true
+    publish.path: true
+    publish.path_capacity: 10000
+
+    # Both streams are already transformed/calibrated into the gimbal frame by
+    # fusion_ws, so the remaining virtual lidar-to-IMU extrinsic is identity.
+    mapping.extrinsic_est_en: false
+    mapping.extrinsic_T: [0.0, 0.0, 0.0]
+    mapping.extrinsic_R: [1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0]
+    mapping.gravity: [0.0, 0.0, -9.80665]
+    mapping.det_range: 100.0
+    mapping.plane_thr: 0.10
+    mapping.match_s: 81.0
+    mapping.lidar_meas_cov: 0.10
+    mapping.gyr_cov_input: 0.10
+    mapping.acc_cov_input: 0.10
+    mapping.b_gyr_cov: 1.0e-4
+    mapping.b_acc_cov: 1.0e-4
+    mapping.ivox_grid_resolution: 0.30
+    mapping.ivox_nearby_type: 18
+    mapping.initialization_points: 100
+
+    imu.initialization_samples: 100
+    preprocess.blind: 0.25
+    preprocess.point_filter_num: 2
+    filter_size_surf: 0.30

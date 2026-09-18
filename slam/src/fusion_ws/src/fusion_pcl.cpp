@@ -29,11 +29,23 @@
 #include <std_msgs/msg/bool.hpp>
 #include <yaml-cpp/yaml.h>
 
+struct EIGEN_ALIGN16 TimedPoint {
+  PCL_ADD_POINT4D;
+  float intensity;
+  float time;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(
+    TimedPoint,
+    (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)
+        (float, time, time))
+
 class FusionPcl final : public rclcpp::Node {
  public:
   using CustomMsg = livox_ros_driver2::msg::CustomMsg;
   using Imu = sensor_msgs::msg::Imu;
-  using Cloud = pcl::PointCloud<pcl::PointXYZI>;
+  using Cloud = pcl::PointCloud<TimedPoint>;
 
   FusionPcl() : Node("fusion_pcl") {
     const std::string package_share =
@@ -177,19 +189,26 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   static Cloud::Ptr transformCloud(
-      const CustomMsg &message, const Eigen::Matrix4d &transform) {
+      const CustomMsg &message, const Eigen::Matrix4d &transform,
+      double header_offset) {
     Cloud::Ptr input(new Cloud);
     input->reserve(message.points.size());
+    // Point-LIO consumes the per-point offset in seconds.  Keep it through the
+    // two-lidar transform instead of collapsing the fused scan to PointXYZI.
+    // Both packets use their own header as time zero; the synchronization
+    // tolerance keeps those two origins close enough for a single scan.
     for (const auto &point : message.points) {
       const double range_squared =
           point.x * point.x + point.y * point.y + point.z * point.z;
       if (std::isfinite(point.x) && std::isfinite(point.y) &&
           std::isfinite(point.z) && range_squared > 1e-8) {
-        pcl::PointXYZI output;
+        TimedPoint output;
         output.x = point.x;
         output.y = point.y;
         output.z = point.z;
         output.intensity = static_cast<float>(point.reflectivity);
+        output.time = static_cast<float>(
+            static_cast<double>(point.offset_time) * 1.0e-9 + header_offset);
         input->push_back(output);
       }
     }
@@ -241,15 +260,20 @@ class FusionPcl final : public rclcpp::Node {
   void publishCloudPair(
       const TimedMessage<CustomMsg> &lidar5,
       const TimedMessage<CustomMsg> &lidar3) {
-    Cloud::Ptr fused = transformCloud(*lidar5.message, transforms_[0]);
-    const Cloud::Ptr cloud3 = transformCloud(*lidar3.message, transforms_[1]);
+    const rclcpp::Time output_stamp =
+        lidar5.stamp >= lidar3.stamp ? lidar5.stamp : lidar3.stamp;
+    Cloud::Ptr fused = transformCloud(
+        *lidar5.message, transforms_[0],
+        (lidar5.stamp - output_stamp).seconds());
+    const Cloud::Ptr cloud3 = transformCloud(
+        *lidar3.message, transforms_[1],
+        (lidar3.stamp - output_stamp).seconds());
     *fused += *cloud3;
 
     sensor_msgs::msg::PointCloud2 output;
     pcl::toROSMsg(*fused, output);
     output.header.frame_id = frame_id_;
-    output.header.stamp =
-        lidar5.stamp >= lidar3.stamp ? lidar5.stamp : lidar3.stamp;
+    output.header.stamp = output_stamp;
     cloud_pub_->publish(output);
   }
 

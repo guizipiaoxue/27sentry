@@ -19,3 +19,13 @@ the iSAM2 backend. Tests, examples, Python, unstable APIs, TBB integration and
 native-CPU code generation are disabled. The vendored build is statically
 linked into the ROS node to avoid a runtime dependency on an external GTSAM
 installation.
+
+## Point-LIO / IKFoM / iVox
+
+- Upstream: https://github.com/hku-mars/Point-LIO
+- License: BSD-3-Clause; see `odom/src/plio/POINT_LIO_LICENSE`
+
+The ROS 1 upstream repository is not embedded as a nested Git repository.
+Only the Point-LIO estimator integration and its required header-only IKFoM and
+iVox components are stored in `odom/src/plio/`, ported to this repository's
+ROS 2 fused dual-lidar and dual-IMU topics.

@@ -1,8 +1,10 @@
 // Use the calibrated lidar-to-gimbal transforms to fuse lidar 5 and lidar 3.
 // Cloud pairs are published at the lidar rate (about 10 Hz), while synchronized
 // IMU pairs are rotated into the gimbal frame, averaged, and published at the
-// IMU rate (about 200 Hz). ROS header stamps always use sec + nanosec; the
-// different device packet units must not be applied to header.stamp.
+// IMU rate (about 200 Hz). The lidar5 timestamps define the fused IMU timeline;
+// lidar3 measurements are interpolated onto it. ROS header stamps always use
+// sec + nanosec; the different device packet units must not be applied to
+// header.stamp.
 
 #include <algorithm>
 #include <array>
@@ -66,8 +68,8 @@ class FusionPcl final : public rclcpp::Node {
     frame_id_ = declare_parameter<std::string>("frame_id", "gimbal");
     cloud_sync_tolerance_ = declare_parameter<double>(
         "cloud_sync_tolerance", 0.03);
-    imu_sync_tolerance_ = declare_parameter<double>(
-        "imu_sync_tolerance", 0.004);
+    imu_interpolation_max_gap_ = declare_parameter<double>(
+        "imu_interpolation_max_gap", 0.020);
     imu_calibration_seconds_ = declare_parameter<double>(
         "imu_calibration_seconds", 3.0);
     imu_calibration_min_samples_ = declare_parameter<std::int64_t>(
@@ -83,6 +85,12 @@ class FusionPcl final : public rclcpp::Node {
         "max_calibration_gravity_error", 2.0);
     max_queue_size_ = static_cast<std::size_t>(std::max<std::int64_t>(
         2, declare_parameter<std::int64_t>("max_queue_size", 100)));
+    if (!(cloud_sync_tolerance_ > 0.0) ||
+        !(imu_interpolation_max_gap_ > 0.0)) {
+      throw std::runtime_error(
+          "cloud_sync_tolerance and imu_interpolation_max_gap must be in "
+          "positive seconds");
+    }
 
     const std::string lidar5_calibration = declare_parameter<std::string>(
         "lidar5_calibration",
@@ -127,6 +135,11 @@ class FusionPcl final : public rclcpp::Node {
         get_logger(),
         "keep both lidars stationary for %.1f s while their IMUs calibrate",
         imu_calibration_seconds_);
+    RCLCPP_INFO(
+        get_logger(),
+        "MID360 IMU fusion uses lidar5 timestamps and interpolates lidar3 "
+        "(maximum data gap %.1f ms)",
+        imu_interpolation_max_gap_ * 1000.0);
   }
 
  private:
@@ -402,24 +415,49 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void synchronizeImus() {
-    while (!imu_queues_[0].empty() && !imu_queues_[1].empty()) {
-      const double dt =
-          (imu_queues_[0].front().stamp - imu_queues_[1].front().stamp)
-              .seconds();
-      if (std::abs(dt) <= imu_sync_tolerance_) {
-        auto imu5 = std::move(imu_queues_[0].front());
-        auto imu3 = std::move(imu_queues_[1].front());
-        imu_queues_[0].pop_front();
+    // Two independent 200 Hz MID360 IMUs normally have a sampling phase
+    // difference of several milliseconds. Keep lidar5 as the output clock and
+    // interpolate lidar3 instead of requiring two samples to have nearly equal
+    // timestamps.
+    while (!imu_queues_[0].empty() && imu_queues_[1].size() >= 2) {
+      const rclcpp::Time target = imu_queues_[0].front().stamp;
+      while (imu_queues_[1].size() >= 2 &&
+             imu_queues_[1][1].stamp < target) {
         imu_queues_[1].pop_front();
-        publishImuPair(imu5, imu3);
-      } else {
-        const std::size_t older = dt < 0.0 ? 0 : 1;
-        imu_queues_[older].pop_front();
+      }
+      if (imu_queues_[1].size() < 2) {
+        return;
+      }
+
+      const auto &before = imu_queues_[1][0];
+      const auto &after = imu_queues_[1][1];
+      if (target < before.stamp) {
+        // No earlier lidar3 measurement is available for this initial lidar5
+        // sample, so interpolation is impossible.
+        imu_queues_[0].pop_front();
+        continue;
+      }
+
+      const double interval = (after.stamp - before.stamp).seconds();
+      if (!(interval > 0.0)) {
+        imu_queues_[1].pop_front();
+        continue;
+      }
+      if (interval > imu_interpolation_max_gap_) {
         RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 3000,
-            "dropping unsynchronized lidar%zu IMU sample (delta %.4f s)",
-            older == 0 ? 5UL : 3UL, std::abs(dt));
+            "lidar3 IMU data gap is %.4f s; dropping lidar5 sample instead "
+            "of interpolating across the gap",
+            interval);
+        imu_queues_[0].pop_front();
+        continue;
       }
+
+      const double alpha = (target - before.stamp).seconds() / interval;
+      publishInterpolatedImu(
+          imu_queues_[0].front(), before, after,
+          std::clamp(alpha, 0.0, 1.0));
+      imu_queues_[0].pop_front();
     }
   }
 
@@ -433,21 +471,29 @@ class FusionPcl final : public rclcpp::Node {
             imu.linear_acceleration.z};
   }
 
-  void publishImuPair(
-      const TimedMessage<Imu> &imu5, const TimedMessage<Imu> &imu3) {
+  void publishInterpolatedImu(
+      const TimedMessage<Imu> &imu5,
+      const TimedMessage<Imu> &imu3_before,
+      const TimedMessage<Imu> &imu3_after,
+      double alpha) {
     const Eigen::Vector3d gyro5 = calibrations_[0].imu_to_gimbal *
         (angularVelocity(*imu5.message) - calibrations_[0].gyro_bias);
+    const Eigen::Vector3d gyro3_raw =
+        (1.0 - alpha) * angularVelocity(*imu3_before.message) +
+        alpha * angularVelocity(*imu3_after.message);
     const Eigen::Vector3d gyro3 = calibrations_[1].imu_to_gimbal *
-        (angularVelocity(*imu3.message) - calibrations_[1].gyro_bias);
+        (gyro3_raw - calibrations_[1].gyro_bias);
     const Eigen::Vector3d accel5 =
         calibrations_[0].imu_to_gimbal *
             (calibrations_[0].accel_scale *
              linearAcceleration(*imu5.message)) -
         calibrations_[0].accel_bias_gimbal;
+    const Eigen::Vector3d accel3_raw =
+        (1.0 - alpha) * linearAcceleration(*imu3_before.message) +
+        alpha * linearAcceleration(*imu3_after.message);
     const Eigen::Vector3d accel3 =
         calibrations_[1].imu_to_gimbal *
-            (calibrations_[1].accel_scale *
-             linearAcceleration(*imu3.message)) -
+            (calibrations_[1].accel_scale * accel3_raw) -
         calibrations_[1].accel_bias_gimbal;
 
     const Eigen::Vector3d gyro = 0.5 * (gyro5 + gyro3);
@@ -461,7 +507,7 @@ class FusionPcl final : public rclcpp::Node {
 
     Imu output;
     output.header.frame_id = frame_id_;
-    output.header.stamp = imu5.stamp >= imu3.stamp ? imu5.stamp : imu3.stamp;
+    output.header.stamp = imu5.stamp;
     // Livox IMUs do not provide orientation; -1 explicitly marks it absent.
     output.orientation_covariance[0] = -1.0;
     output.angular_velocity.x = gyro.x();
@@ -479,7 +525,7 @@ class FusionPcl final : public rclcpp::Node {
   std::string imu_output_topic_;
   std::string frame_id_;
   double cloud_sync_tolerance_ = 0.03;
-  double imu_sync_tolerance_ = 0.004;
+  double imu_interpolation_max_gap_ = 0.020;
   double imu_calibration_seconds_ = 3.0;
   std::int64_t imu_calibration_min_samples_ = 400;
   double gravity_ = 9.80665;

@@ -164,23 +164,51 @@ class PointLioNode final : public rclcpp::Node {
   }
 
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
+    pcl::PointCloud<pcl::PointXYZI> input;
+    pcl::fromROSMsg(*message, input);
+
     Cloud::Ptr cloud(new Cloud);
-    pcl::fromROSMsg(*message, *cloud);
+    cloud->resize(input.size());
+    cloud->width = input.width;
+    cloud->height = input.height;
+    cloud->is_dense = input.is_dense;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+      const auto &source = input.points[i];
+      auto &target = cloud->points[i];
+      target.x = source.x;
+      target.y = source.y;
+      target.z = source.z;
+      target.intensity = source.intensity;
+      target.normal_x = 0.0F;
+      target.normal_y = 0.0F;
+      target.normal_z = 0.0F;
+      target.curvature = 0.0F;
+    }
+
     // fusion_ws publishes seconds in `time`; Point-LIO stores milliseconds in
-    // PointXYZINormal::curvature. PointXYZI input is a zero-offset fallback.
+    // PointXYZINormal::curvature. Missing timing falls back to zero offset.
     const auto field = std::find_if(
         message->fields.begin(), message->fields.end(),
         [](const sensor_msgs::msg::PointField &candidate) { return candidate.name == "time"; });
-    if (field != message->fields.end() &&
-        field->datatype == sensor_msgs::msg::PointField::FLOAT32) {
+    const bool valid_time_field =
+        field != message->fields.end() &&
+        field->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+        field->count == 1 &&
+        field->offset + sizeof(float) <= message->point_step;
+    const std::size_t expected_points =
+        static_cast<std::size_t>(message->width) * message->height;
+    if (valid_time_field && input.size() == expected_points) {
       const std::uint8_t *data = message->data.data();
       for (std::size_t i = 0; i < cloud->size(); ++i) {
+        const std::size_t row = i / message->width;
+        const std::size_t column = i % message->width;
+        const std::size_t offset = row * message->row_step +
+            column * message->point_step + field->offset;
         float seconds = 0.0F;
-        std::memcpy(&seconds, data + i * message->point_step + field->offset, sizeof(seconds));
+        std::memcpy(&seconds, data + offset, sizeof(seconds));
         cloud->points[i].curvature = seconds * 1000.0F;
       }
     } else {
-      for (auto &point : cloud->points) point.curvature = 0.0F;
       RCLCPP_WARN_ONCE(get_logger(),
                        "input cloud has no float32 time field; point timing is disabled");
     }

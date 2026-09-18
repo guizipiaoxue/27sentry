@@ -229,7 +229,9 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
+# Each node runs in its own session, so terminal SIGINT only reaches this
+# supervisor. Kill every process group immediately to make Ctrl+C deterministic.
+trap 'force_cleanup 130' INT
 trap 'exit 143' TERM
 
 DRIVER_ARGS=(

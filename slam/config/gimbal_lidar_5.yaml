@@ -1,12 +1,16 @@
-circle_center: [-0.000534786, -0.189034487, 0.108696408]
-circle_residual: 0.078667874
-samples: 1948
-rejected: 2
-gravity_lidar: [-0.000074919, 0.493971348, -0.869478178]
-gravity_roll: 2.624941286
-gravity_pitch: 0.000074919
+calibration_method: yaw_axis_preserve_static_cloud_heading
+source_bag: 20260919_194252_yaw_cali
+source_bag_integrity: truncated_tail_recovered_read_only
+recovered_pose_duration_seconds: 115.180670
+samples: 3174
+yaw_axis_lidar: [-0.000428395, -0.501815321, 0.864974682]
+axis_dominance: 0.998961904
+axis_mapping_error_deg: 0.000000000
+relative_yaw_adjustment_deg: 0.000000000
+static_cloud_point_plane_rms: 0.074099549
+static_cloud_point_plane_median: 0.033826090
 lidar_to_gimbal_rotation:
-  - [0.999999997, 0.000037008, -0.000065140]
-  - [-0.000000000, 0.869478180, 0.493971350]
-  - [0.000074919, -0.493971348, 0.869478178]
+  - [0.999999908, -0.000213591, 0.000371354]
+  - [-0.000001600, 0.864974762, 0.501815366]
+  - [-0.000428395, -0.501815321, 0.864974682]
 lidar_to_gimbal_translation: [0.000548862, 0.110668451, 0.000000000]

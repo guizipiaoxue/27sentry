@@ -51,9 +51,9 @@ class DualYawCircleCali final : public rclcpp::Node {
     maximum_angular_jump_ =
         declare_parameter<double>("maximum_angular_jump", 0.50);
     maximum_linear_speed_ =
-        declare_parameter<double>("maximum_linear_speed", 3.0);
+        declare_parameter<double>("maximum_linear_speed", 5.0);
     maximum_angular_speed_ =
-        declare_parameter<double>("maximum_angular_speed", 3.0);
+        declare_parameter<double>("maximum_angular_speed", 6.0);
     convergence_rotation_degrees_ =
         declare_parameter<double>("convergence_rotation_degrees", 0.10);
     convergence_reports_ = declare_parameter<int>("convergence_reports", 5);
@@ -201,12 +201,13 @@ class DualYawCircleCali final : public rclcpp::Node {
           (normal_interval &&
            (position_change / dt > maximum_linear_speed_ ||
             angle_change / dt > maximum_angular_speed_))) {
-        RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 3000,
-            "lidar%zu rejected discontinuous pose: dp=%.3f m da=%.2f deg dt=%.3f s",
+        RCLCPP_WARN(
+            get_logger(),
+            "lidar%zu DLIO pose reset: dp=%.3f m da=%.2f deg dt=%.3f s; "
+            "restarting trajectory after initialization correction",
             index == 0 ? 5UL : 3UL, position_change,
             angle_change * 180.0 / kPi, dt);
-        return;
+        poses.clear();
       }
     }
     poses.push_back(sample);
@@ -278,6 +279,20 @@ class DualYawCircleCali final : public rclcpp::Node {
       result.reason = "rotate farther in both yaw directions";
       return result;
     }
+
+    // Yaw-only motion observes the rotation axis, but it cannot observe an
+    // absolute heading around that axis from a trajectory alone.  Correct the
+    // measured axis to gimbal +Z with the smallest rotation and preserve the
+    // heading already established by the static dual-cloud calibration.
+    const Eigen::Vector3d mapped_axis =
+        initial_rotations_[index] * result.axis;
+    result.rotation =
+        Eigen::Quaterniond::FromTwoVectors(mapped_axis,
+                                           Eigen::Vector3d::UnitZ())
+            .toRotationMatrix() *
+        initial_rotations_[index];
+    result.valid = true;
+    result.reason = "yaw axis fit passed";
 
     const Eigen::Quaterniond first_orientation = poses.front().orientation;
     const Eigen::Vector3d first_position = poses.front().position;
@@ -400,25 +415,10 @@ class DualYawCircleCali final : public rclcpp::Node {
       return result;
     }
 
-    const Eigen::Vector3d source_x = result.center.normalized();
-    const Eigen::Vector3d source_z = result.axis;
-    const Eigen::Vector3d source_y = source_z.cross(source_x).normalized();
-    const Eigen::Vector3d target_z = Eigen::Vector3d::UnitZ();
-    Eigen::Vector3d target_x(-translations_[index].x(),
-                             -translations_[index].y(), 0.0);
-    target_x.normalize();
-    const Eigen::Vector3d target_y = target_z.cross(target_x).normalized();
-    Eigen::Matrix3d source_basis;
-    source_basis.col(0) = source_x;
-    source_basis.col(1) = source_y;
-    source_basis.col(2) = source_z;
-    Eigen::Matrix3d target_basis;
-    target_basis.col(0) = target_x;
-    target_basis.col(1) = target_y;
-    target_basis.col(2) = target_z;
-    result.rotation = target_basis * source_basis.transpose();
-    result.valid = true;
-    result.reason = "fit passed";
+    if (result.residual > maximum_circle_residual_ ||
+        std::abs(result.radius - expected_radius) > maximum_radius_error_) {
+      result.reason = "yaw axis fit passed; DLIO translation circle is diagnostic only";
+    }
     return result;
   }
 
@@ -451,7 +451,9 @@ class DualYawCircleCali final : public rclcpp::Node {
     if (equal_height_) {
       translation.z() = shared_height;
     }
-    configuration["calibration_method"] = "dual_dlio_yaw_circle";
+    configuration["calibration_method"] = "dual_dlio_yaw_axis_preserve_heading";
+    configuration["yaw_observability"] =
+        "heading preserved from static dual-cloud calibration";
     configuration["circle_center"] = vectorNode(fit.center);
     configuration["circle_residual"] = fit.residual;
     configuration["circle_radius"] = fit.radius;

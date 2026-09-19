@@ -245,6 +245,11 @@ stop_process_group() {
   fi
 }
 
+process_group_alive() {
+  local pid="${1:-}"
+  [[ -n "${pid}" ]] && kill -0 -- "-${pid}" 2>/dev/null
+}
+
 stop_runtime() {
   local signal="$1"
   stop_process_group "${CALI_PID}" "${signal}"
@@ -280,15 +285,21 @@ cleanup() {
   if [[ -n "${RECORD_PID}" ]]; then
     printf '[rotate_cali] Finalizing rosbag: %s\n' "${ROSBAG_OUTPUT}" >&2
     stop_process_group "${RECORD_PID}" TERM
-    for _ in {1..30}; do
-      if ! kill -0 "${RECORD_PID}" 2>/dev/null; then
+    # ros2 bag record may leave its writer child alive after the CLI leader
+    # exits. Wait for the complete session/process group so SQLite can finish
+    # its final transaction and checkpoint before any forced kill.
+    for _ in {1..200}; do
+      if ! process_group_alive "${RECORD_PID}"; then
         break
       fi
       sleep 0.1
     done
   fi
-  sleep 0.5
-  stop_all KILL
+  stop_runtime KILL
+  if process_group_alive "${RECORD_PID}"; then
+    printf '[rotate_cali] Rosbag did not stop within 20 seconds; forcing shutdown.\n' >&2
+    stop_process_group "${RECORD_PID}" KILL
+  fi
   wait 2>/dev/null || true
   exit "${status}"
 }
@@ -416,6 +427,9 @@ fi
 WATCH_PIDS=("${DLIO5_PID}" "${DLIO3_PID}" "${CALI_PID}")
 if [[ -n "${DRIVER_PID}" ]]; then
   WATCH_PIDS+=("${DRIVER_PID}")
+fi
+if [[ -n "${PLAYBACK_PID}" ]]; then
+  WATCH_PIDS+=("${PLAYBACK_PID}")
 fi
 if [[ -n "${RECORD_PID}" ]]; then
   WATCH_PIDS+=("${RECORD_PID}")

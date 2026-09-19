@@ -69,6 +69,7 @@ struct MeasurementContext {
   bool estimate_extrinsics = false;
   std::size_t begin = 0;
   std::size_t end = 0;
+  std::size_t *matched_points = nullptr;
 };
 
 thread_local MeasurementContext *measurement_context = nullptr;
@@ -193,6 +194,9 @@ void lidarMeasurement(
     data.valid = false;
     return;
   }
+  if (measurement_context->matched_points != nullptr) {
+    *measurement_context->matched_points += matches.size();
+  }
   data.M_Noise = measurement_context->covariance;
   data.h_x = Eigen::MatrixXd::Zero(matches.size(), 12);
   data.z.resize(matches.size());
@@ -291,6 +295,7 @@ class PointLioEstimator::Impl {
   Result process(const Cloud::ConstPtr &input, double stamp) {
     Result result;
     result.stamp = stamp;
+    result.input_points = input == nullptr ? 0 : input->size();
     if (!initialized_) {
       result.waiting_for_imu = true;
       return result;
@@ -327,7 +332,10 @@ class PointLioEstimator::Impl {
           return left.curvature < right.curvature;
         });
 
-    const double scan_end = stamp + pointOffset(filtered->points.back());
+    result.filtered_points = filtered->size();
+    result.scan_start = stamp + pointOffset(filtered->points.front());
+    result.scan_end = stamp + pointOffset(filtered->points.back());
+    const double scan_end = result.scan_end;
     if (imu_.empty() || imu_.back().stamp < scan_end) {
       result.waiting_for_imu = true;
       return result;
@@ -361,6 +369,7 @@ class PointLioEstimator::Impl {
         context.estimate_extrinsics = parameters_.estimate_extrinsics;
         context.begin = begin;
         context.end = end;
+        context.matched_points = &result.matched_points;
         measurement_context = &context;
         filter_.update_iterated_dyn_share_modified();
         measurement_context = nullptr;
@@ -386,6 +395,12 @@ class PointLioEstimator::Impl {
     result.position = filter_.x_.pos;
     result.orientation = Eigen::Quaterniond(filter_.x_.rot);
     result.velocity = filter_.x_.vel;
+    result.angular_velocity = filter_.x_.omg;
+    result.acceleration = filter_.x_.acc;
+    result.gravity = filter_.x_.gravity;
+    result.gyro_bias = filter_.x_.bg;
+    result.accel_bias = filter_.x_.ba;
+    result.map_voxels = map_->NumValidGrids();
     *result.registered = world;
     *result.body = *filtered;
     return result;
@@ -404,13 +419,51 @@ class PointLioEstimator::Impl {
     }
     Eigen::Vector3d acceleration = Eigen::Vector3d::Zero();
     Eigen::Vector3d gyro = Eigen::Vector3d::Zero();
+    Eigen::Vector3d acceleration_squared = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gyro_squared = Eigen::Vector3d::Zero();
     for (const auto &sample : imu_for_initialization_) {
       acceleration += sample.acceleration;
       gyro += sample.angular_velocity;
+      acceleration_squared += sample.acceleration.cwiseProduct(
+          sample.acceleration);
+      gyro_squared += sample.angular_velocity.cwiseProduct(
+          sample.angular_velocity);
     }
-    acceleration /= static_cast<double>(imu_for_initialization_.size());
-    gyro /= static_cast<double>(imu_for_initialization_.size());
+    const double sample_count =
+        static_cast<double>(imu_for_initialization_.size());
+    acceleration /= sample_count;
+    gyro /= sample_count;
     if (acceleration.norm() < 1.0e-3) {
+      return;
+    }
+    const Eigen::Vector3d acceleration_variance =
+        (acceleration_squared / sample_count -
+         acceleration.cwiseProduct(acceleration)).cwiseMax(0.0);
+    const Eigen::Vector3d gyro_variance =
+        (gyro_squared / sample_count - gyro.cwiseProduct(gyro)).cwiseMax(0.0);
+    const double accel_stddev =
+        acceleration_variance.cwiseSqrt().maxCoeff();
+    const double gyro_stddev = gyro_variance.cwiseSqrt().maxCoeff();
+    const double gravity_error =
+        std::abs(acceleration.norm() - parameters_.gravity.norm());
+
+    initialization_report_.valid = false;
+    initialization_report_.samples = imu_for_initialization_.size();
+    initialization_report_.mean_acceleration = acceleration;
+    initialization_report_.gravity =
+        -acceleration.normalized() * parameters_.gravity.norm();
+    initialization_report_.gyro_bias = gyro;
+    initialization_report_.accel_bias =
+        acceleration + initialization_report_.gravity;
+    initialization_report_.gyro_mean_norm = gyro.norm();
+    initialization_report_.gyro_stddev = gyro_stddev;
+    initialization_report_.accel_norm = acceleration.norm();
+    initialization_report_.accel_stddev = accel_stddev;
+    initialization_report_.gravity_error = gravity_error;
+    if (gyro.norm() > parameters_.initialization_max_gyro_mean ||
+        gyro_stddev > parameters_.initialization_max_gyro_stddev ||
+        accel_stddev > parameters_.initialization_max_accel_stddev ||
+        gravity_error > parameters_.initialization_max_gravity_error) {
       return;
     }
 
@@ -423,8 +476,6 @@ class PointLioEstimator::Impl {
     filter_.x_.bg = gyro;
     filter_.x_.ba = acceleration - filter_.x_.acc;
     initialization_report_.valid = true;
-    initialization_report_.samples = imu_for_initialization_.size();
-    initialization_report_.mean_acceleration = acceleration;
     initialization_report_.gravity = filter_.x_.gravity;
     initialization_report_.gyro_bias = filter_.x_.bg;
     initialization_report_.accel_bias = filter_.x_.ba;

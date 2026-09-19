@@ -5,6 +5,8 @@
     publish.tf: true
     publish.path: true
     publish.path_capacity: 10000
+    terminal.enabled: true
+    terminal.clear_screen: true
 
     # Both streams are already transformed/calibrated into the gimbal frame by
     # fusion_ws, so the remaining virtual lidar-to-IMU extrinsic is identity.
@@ -31,6 +33,11 @@
     mapping.initialization_points: 100
 
     imu.initialization_samples: 100
-    preprocess.blind: 0.25
+    imu.initialization_max_gyro_mean: 0.05
+    imu.initialization_max_gyro_stddev: 0.02
+    imu.initialization_max_accel_stddev: 0.30
+    imu.initialization_max_gravity_error: 0.75
+    # MID360 near-field returns often contain the sensor/gimbal itself.
+    preprocess.blind: 0.50
     preprocess.point_filter_num: 2
     filter_size_surf: 0.30

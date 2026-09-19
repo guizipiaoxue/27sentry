@@ -18,7 +18,7 @@ plio::Cloud::Ptr makePlane() {
       point.y = static_cast<float>(y) * 0.2F;
       point.z = 0.0F;
       point.intensity = 1.0F;
-      point.curvature = 0.0F;
+      point.curvature = static_cast<float>(x + 10) / 20.0F * 90.0F;
       cloud->push_back(point);
     }
   }
@@ -64,6 +64,26 @@ plio::Result runStaticScenario(const Eigen::Vector3d &acceleration,
 }  // namespace
 
 int main() {
+  {
+    plio::Parameters parameters;
+    parameters.initialization_samples = 100;
+    plio::PointLioEstimator moving_estimator(parameters);
+    for (int i = 0; i < 100; ++i) {
+      plio::ImuSample sample;
+      sample.stamp = static_cast<double>(i) * 0.005;
+      sample.acceleration = Eigen::Vector3d(
+          i % 2 == 0 ? 1.0 : -1.0, 0.0, kGravity);
+      moving_estimator.addImu(sample);
+    }
+    const plio::ImuInitializationReport moving_report =
+        moving_estimator.initializationReport();
+    if (moving_estimator.initialized() || moving_report.valid ||
+        moving_report.accel_stddev < 0.9) {
+      std::cerr << "moving IMU window was accepted during initialization\n";
+      return EXIT_FAILURE;
+    }
+  }
+
   plio::ImuInitializationReport report;
   plio::Result result = runStaticScenario(
       Eigen::Vector3d(0.0, 0.0, kGravity), report);
@@ -81,7 +101,12 @@ int main() {
   if (!result.initialized || result.position.norm() > 1.0e-4 ||
       result.velocity.norm() > 1.0e-4 ||
       result.orientation.angularDistance(Eigen::Quaterniond::Identity()) >
-          1.0e-4) {
+          1.0e-4 ||
+      !near(result.gravity, Eigen::Vector3d(0.0, 0.0, -kGravity), 1.0e-9) ||
+      result.gyro_bias.norm() > 1.0e-12 ||
+      result.accel_bias.norm() > 1.0e-12 || result.filtered_points == 0 ||
+      result.matched_points == 0 || result.map_voxels == 0 ||
+      std::abs((result.scan_end - result.scan_start) - 0.09) > 1.0e-6) {
     std::cerr << "static estimate drifted: position="
               << result.position.transpose() << " velocity="
               << result.velocity.transpose() << " rotation_error="

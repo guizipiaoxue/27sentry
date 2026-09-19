@@ -75,6 +75,8 @@ class FusionPcl final : public rclcpp::Node {
     imu_calibration_min_samples_ = declare_parameter<std::int64_t>(
         "imu_calibration_min_samples", 400);
     gravity_ = declare_parameter<double>("gravity", 9.80665);
+    imu_accel_unit_ = declare_parameter<std::string>(
+        "imu_accel_unit", "m/s^2");
     max_gyro_stddev_ = declare_parameter<double>(
         "max_calibration_gyro_stddev", 0.02);
     max_gyro_mean_ = declare_parameter<double>(
@@ -82,7 +84,7 @@ class FusionPcl final : public rclcpp::Node {
     max_accel_stddev_ = declare_parameter<double>(
         "max_calibration_accel_stddev", 0.30);
     max_gravity_error_ = declare_parameter<double>(
-        "max_calibration_gravity_error", 2.0);
+        "max_calibration_gravity_error", 0.75);
     max_queue_size_ = static_cast<std::size_t>(std::max<std::int64_t>(
         2, declare_parameter<std::int64_t>("max_queue_size", 100)));
     if (!(cloud_sync_tolerance_ > 0.0) ||
@@ -90,6 +92,11 @@ class FusionPcl final : public rclcpp::Node {
       throw std::runtime_error(
           "cloud_sync_tolerance and imu_interpolation_max_gap must be in "
           "positive seconds");
+    }
+    if (imu_accel_unit_ != "m/s^2" && imu_accel_unit_ != "mps2" &&
+        imu_accel_unit_ != "g" && imu_accel_unit_ != "auto") {
+      throw std::runtime_error(
+          "imu_accel_unit must be m/s^2, mps2, g, or auto");
     }
 
     const std::string lidar5_calibration = declare_parameter<std::string>(
@@ -140,6 +147,9 @@ class FusionPcl final : public rclcpp::Node {
         "MID360 IMU fusion uses lidar5 timestamps and interpolates lidar3 "
         "(maximum data gap %.1f ms)",
         imu_interpolation_max_gap_ * 1000.0);
+    RCLCPP_INFO(
+        get_logger(), "configured raw IMU acceleration unit: %s",
+        imu_accel_unit_.c_str());
   }
 
  private:
@@ -273,6 +283,9 @@ class FusionPcl final : public rclcpp::Node {
   void publishCloudPair(
       const TimedMessage<CustomMsg> &lidar5,
       const TimedMessage<CustomMsg> &lidar3) {
+    // Keep the later packet stamp used by the 1c37bd6 fusion pipeline. Point
+    // offsets include each packet's signed header delta, so their absolute
+    // acquisition times remain correct even when the earlier packet is first.
     const rclcpp::Time output_stamp =
         lidar5.stamp >= lidar3.stamp ? lidar5.stamp : lidar3.stamp;
     Cloud::Ptr fused = transformCloud(
@@ -345,11 +358,17 @@ class FusionPcl final : public rclcpp::Node {
     const Eigen::Vector3d gyro_mean = calibration.gyro_sum / count;
     const Eigen::Vector3d accel_mean_raw = calibration.accel_sum / count;
     const double accel_norm_raw = accel_mean_raw.norm();
-    calibration.accel_scale =
-        std::abs(accel_norm_raw - 1.0) <
-                std::abs(accel_norm_raw - gravity_)
-            ? gravity_
-            : 1.0;
+    if (imu_accel_unit_ == "g") {
+      calibration.accel_scale = gravity_;
+    } else if (imu_accel_unit_ == "auto") {
+      calibration.accel_scale =
+          std::abs(accel_norm_raw - 1.0) <
+                  std::abs(accel_norm_raw - gravity_)
+              ? gravity_
+              : 1.0;
+    } else {
+      calibration.accel_scale = 1.0;
+    }
     const Eigen::Vector3d accel_mean =
         calibration.accel_scale * accel_mean_raw;
     const Eigen::Vector3d gyro_variance =
@@ -372,9 +391,10 @@ class FusionPcl final : public rclcpp::Node {
       RCLCPP_WARN(
           get_logger(),
           "lidar%zu moved during IMU calibration (gyro mean %.4f, gyro std "
-          "%.4f, accel std %.4f, gravity error %.3f); restarting",
+          "%.4f, raw accel norm %.4f %s, accel std %.4f m/s^2, gravity "
+          "error %.3f); restarting",
           index == 0 ? 5UL : 3UL, gyro_mean.norm(), gyro_stddev,
-          accel_stddev, gravity_error);
+          accel_norm_raw, imu_accel_unit_.c_str(), accel_stddev, gravity_error);
       resetCalibration(index);
       return;
     }
@@ -522,6 +542,7 @@ class FusionPcl final : public rclcpp::Node {
   std::string cloud_output_topic_;
   std::string imu_output_topic_;
   std::string frame_id_;
+  std::string imu_accel_unit_ = "m/s^2";
   double cloud_sync_tolerance_ = 0.03;
   double imu_interpolation_max_gap_ = 0.020;
   double imu_calibration_seconds_ = 3.0;
@@ -530,7 +551,7 @@ class FusionPcl final : public rclcpp::Node {
   double max_gyro_stddev_ = 0.02;
   double max_gyro_mean_ = 0.1;
   double max_accel_stddev_ = 0.30;
-  double max_gravity_error_ = 2.0;
+  double max_gravity_error_ = 0.75;
   bool imu_calibration_complete_ = false;
   std::size_t max_queue_size_ = 100;
   std::array<Eigen::Matrix4d, 2> transforms_ = {

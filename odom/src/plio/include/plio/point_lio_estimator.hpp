@@ -24,7 +24,7 @@ struct ImuSample {
 struct Parameters {
   double surface_leaf_size = 0.30;
   double map_resolution = 0.30;
-  double blind = 0.25;
+  double blind = 0.50;
   double detection_range = 100.0;
   double plane_threshold = 0.10;
   double match_scale = 81.0;
@@ -37,6 +37,10 @@ struct Parameters {
   double gyro_bias_covariance = 1.0e-4;
   double accel_bias_covariance = 1.0e-4;
   std::size_t initialization_samples = 100;
+  double initialization_max_gyro_mean = 0.05;
+  double initialization_max_gyro_stddev = 0.02;
+  double initialization_max_accel_stddev = 0.30;
+  double initialization_max_gravity_error = 0.75;
   std::size_t initialization_points = 100;
   std::size_t point_filter = 2;
   int nearby_type = 18;
@@ -53,6 +57,17 @@ struct Result {
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
   Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+  Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
+  Eigen::Vector3d acceleration = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gravity = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero();
+  Eigen::Vector3d accel_bias = Eigen::Vector3d::Zero();
+  std::size_t input_points = 0;
+  std::size_t filtered_points = 0;
+  std::size_t matched_points = 0;
+  std::size_t map_voxels = 0;
+  double scan_start = 0.0;
+  double scan_end = 0.0;
   Cloud::Ptr registered{new Cloud};
   Cloud::Ptr body{new Cloud};
 };
@@ -64,6 +79,11 @@ struct ImuInitializationReport {
   Eigen::Vector3d gravity = Eigen::Vector3d::Zero();
   Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero();
   Eigen::Vector3d accel_bias = Eigen::Vector3d::Zero();
+  double gyro_mean_norm = 0.0;
+  double gyro_stddev = 0.0;
+  double accel_norm = 0.0;
+  double accel_stddev = 0.0;
+  double gravity_error = 0.0;
 };
 
 class PointLioEstimator {

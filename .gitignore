@@ -4,3 +4,4 @@ log
 *.log
 maps/
 *.pcd
+rosbag/

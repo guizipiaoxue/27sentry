@@ -12,13 +12,19 @@ Start the dual-Livox, dual-IMU fusion pipeline with the selected odometry.
 
 Options:
   -a, --algorithm ALGORITHM  Odometry algorithm: dlio or plio (default: dlio)
+      --record-bag           Record diagnostic topics (default)
+      --no-record-bag        Disable rosbag recording
+      --bag-output PATH      Set the rosbag output directory
   -h, --help                 Show this help message
 
-The default can also be set with ODOM_ALGORITHM=dlio|plio.
+Environment defaults: ODOM_ALGORITHM=dlio|plio, RECORD_ROSBAG=0|1,
+ROSBAG_OUTPUT=/path/to/bag.
 EOF
 }
 
 ODOM_ALGORITHM="${ODOM_ALGORITHM:-dlio}"
+RECORD_ROSBAG="${RECORD_ROSBAG:-1}"
+ROSBAG_OUTPUT="${ROSBAG_OUTPUT:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -a|--algorithm)
@@ -32,6 +38,27 @@ while [[ $# -gt 0 ]]; do
       ;;
     --algorithm=*)
       ODOM_ALGORITHM="${1#*=}"
+      shift
+      ;;
+    --record-bag)
+      RECORD_ROSBAG="1"
+      shift
+      ;;
+    --no-record-bag)
+      RECORD_ROSBAG="0"
+      shift
+      ;;
+    --bag-output)
+      if [[ $# -lt 2 ]]; then
+        echo "[start_odom] $1 requires an output path." >&2
+        usage >&2
+        exit 2
+      fi
+      ROSBAG_OUTPUT="$2"
+      shift 2
+      ;;
+    --bag-output=*)
+      ROSBAG_OUTPUT="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -132,6 +159,20 @@ DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
 FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
 IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
 
+if [[ "${RECORD_ROSBAG}" != "0" && "${RECORD_ROSBAG}" != "1" ]]; then
+  echo "[start_odom] RECORD_ROSBAG must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "${RECORD_ROSBAG}" == "1" ]]; then
+  if [[ -z "${ROSBAG_OUTPUT}" ]]; then
+    ROSBAG_OUTPUT="${ROOT_DIR}/rosbag/$(date +%Y%m%d_%H%M%S)_${ODOM_ALGORITHM}"
+  fi
+  if [[ -e "${ROSBAG_OUTPUT}" ]]; then
+    echo "[start_odom] Rosbag output already exists: ${ROSBAG_OUTPUT}" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${ENABLE_GTSAM}" != "0" && "${ENABLE_GTSAM}" != "1" ]]; then
   echo "[start_odom] ENABLE_GTSAM must be 0 or 1." >&2
   exit 1
@@ -181,6 +222,7 @@ FUSION_PID=""
 ODOM_PID=""
 LOOP_PID=""
 BACKEND_PID=""
+BAG_PID=""
 
 stop_process_group() {
   local pid="$1"
@@ -196,13 +238,19 @@ stop_process_group() {
   fi
 }
 
-stop_all_processes() {
+stop_pipeline_processes() {
   local signal="$1"
   stop_process_group "${BACKEND_PID}" "${signal}"
   stop_process_group "${ODOM_PID}" "${signal}"
   stop_process_group "${LOOP_PID}" "${signal}"
   stop_process_group "${FUSION_PID}" "${signal}"
   stop_process_group "${DRIVER_PID}" "${signal}"
+}
+
+stop_all_processes() {
+  local signal="$1"
+  stop_pipeline_processes "${signal}"
+  stop_process_group "${BAG_PID}" "${signal}"
 }
 
 force_cleanup() {
@@ -222,16 +270,28 @@ cleanup() {
   trap 'force_cleanup 143' TERM
 
   printf '\n[start_odom] Stopping all nodes...\n' >&2
-  stop_all_processes TERM
-  sleep 1
-  stop_all_processes KILL
+  stop_pipeline_processes TERM
+  if [[ -n "${BAG_PID}" ]]; then
+    printf '[start_odom] Finalizing rosbag: %s\n' "${ROSBAG_OUTPUT}" >&2
+    stop_process_group "${BAG_PID}" TERM
+    for _ in {1..30}; do
+      if ! kill -0 "${BAG_PID}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    stop_process_group "${BAG_PID}" KILL
+  fi
+  sleep 0.5
+  stop_pipeline_processes KILL
   wait 2>/dev/null || true
   exit "${status}"
 }
 trap cleanup EXIT
 # Each node runs in its own session, so terminal SIGINT only reaches this
-# supervisor. Kill every process group immediately to make Ctrl+C deterministic.
-trap 'force_cleanup 130' INT
+# supervisor. The first Ctrl+C performs a graceful shutdown so rosbag can flush;
+# cleanup installs force_cleanup as the second-Ctrl+C fallback.
+trap 'exit 130' INT
 trap 'exit 143' TERM
 
 DRIVER_ARGS=(
@@ -256,6 +316,40 @@ sleep "${DRIVER_STARTUP_WAIT}"
 if ! kill -0 "${DRIVER_PID}" 2>/dev/null; then
   echo "[start_odom] Livox driver exited during startup." >&2
   wait "${DRIVER_PID}"
+fi
+
+if [[ "${RECORD_ROSBAG}" == "1" ]]; then
+  ROSBAG_TOPICS=(
+    /livox/lidar_192_168_1_5
+    /livox/lidar_192_168_1_3
+    /livox/imu_192_168_1_5
+    /livox/imu_192_168_1_3
+    /gimbal/cloud_fused
+    /gimbal/imu_fused
+    /gimbal/imu_calibrated
+    /point_lio/odom
+    /dlio/odom_node/odom
+    /path
+    /cloud_registered
+    /cloud_registered_body
+    /fusion_pcl
+    /tf
+    /tf_static
+    /parameter_events
+    /rosout
+  )
+  mkdir -p "$(dirname -- "${ROSBAG_OUTPUT}")"
+  echo "[start_odom] Recording diagnostic rosbag: ${ROSBAG_OUTPUT}"
+  setsid ros2 bag record \
+    --output "${ROSBAG_OUTPUT}" \
+    --storage sqlite3 \
+    "${ROSBAG_TOPICS[@]}" &
+  BAG_PID=$!
+  sleep 1
+  if ! kill -0 "${BAG_PID}" 2>/dev/null; then
+    echo "[start_odom] Rosbag recorder exited during startup." >&2
+    wait "${BAG_PID}"
+  fi
 fi
 
 echo "[start_odom] Starting point-cloud and IMU fusion..."
@@ -364,6 +458,9 @@ echo "[start_odom] Press Ctrl+C to stop all nodes."
 
 # Returning when any child exits prevents a partially running pipeline.
 PIPELINE_PIDS=("${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}")
+if [[ "${RECORD_ROSBAG}" == "1" ]]; then
+  PIPELINE_PIDS+=("${BAG_PID}")
+fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   PIPELINE_PIDS+=("${LOOP_PID}" "${BACKEND_PID}")
 fi

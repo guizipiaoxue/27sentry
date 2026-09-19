@@ -332,6 +332,23 @@ class PointLioEstimator::Impl {
           return left.curvature < right.curvature;
         });
 
+    if (filtered->size() > parameters_.maximum_tracking_points) {
+      Cloud::Ptr limited(new Cloud);
+      limited->reserve(parameters_.maximum_tracking_points);
+      const double step = static_cast<double>(filtered->size() - 1) /
+          static_cast<double>(parameters_.maximum_tracking_points - 1);
+      for (std::size_t i = 0; i < parameters_.maximum_tracking_points; ++i) {
+        const std::size_t index = std::min(
+            filtered->size() - 1,
+            static_cast<std::size_t>(std::llround(step * i)));
+        limited->push_back(filtered->points[index]);
+      }
+      limited->width = static_cast<std::uint32_t>(limited->size());
+      limited->height = 1;
+      limited->is_dense = filtered->is_dense;
+      filtered = std::move(limited);
+    }
+
     result.filtered_points = filtered->size();
     result.scan_start = stamp + pointOffset(filtered->points.front());
     result.scan_end = stamp + pointOffset(filtered->points.back());
@@ -350,12 +367,21 @@ class PointLioEstimator::Impl {
     std::size_t begin = 0;
     while (begin < filtered->size()) {
       std::size_t end = begin + 1;
-      const float time = filtered->points[begin].curvature;
-      while (end < filtered->size() &&
-             filtered->points[end].curvature == time) {
-        ++end;
+      if (parameters_.point_time_bin_seconds > 0.0) {
+        const double bin_start = pointOffset(filtered->points[begin]);
+        while (end < filtered->size() &&
+               pointOffset(filtered->points[end]) - bin_start <
+                   parameters_.point_time_bin_seconds) {
+          ++end;
+        }
+      } else {
+        const float time = filtered->points[begin].curvature;
+        while (end < filtered->size() &&
+               filtered->points[end].curvature == time) {
+          ++end;
+        }
       }
-      const double point_time = stamp + static_cast<double>(time) * 1.0e-3;
+      const double point_time = stamp + pointOffset(filtered->points[end - 1]);
       propagateTo(point_time);
       if (map_initialized_) {
         MeasurementContext context;

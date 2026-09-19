@@ -77,6 +77,16 @@ class PointLioNode final : public rclcpp::Node {
     body_frame_ = parameter<std::string>(*this, "frames.body", "gimbal");
     publish_tf_ = parameter<bool>(*this, "publish.tf", true);
     publish_path_ = parameter<bool>(*this, "publish.path", true);
+    state_publish_rate_hz_ = parameter<double>(
+        *this, "publish.state_rate_hz", 100.0);
+    maximum_extrapolation_seconds_ = parameter<double>(
+        *this, "publish.max_extrapolation_seconds", 0.05);
+    if (!(state_publish_rate_hz_ > 0.0) ||
+        maximum_extrapolation_seconds_ < 0.0) {
+      throw std::runtime_error(
+          "publish.state_rate_hz must be positive and "
+          "publish.max_extrapolation_seconds must be non-negative");
+    }
     terminal_enabled_ = parameter<bool>(*this, "terminal.enabled", true);
     terminal_clear_screen_ =
         parameter<bool>(*this, "terminal.clear_screen", true);
@@ -112,6 +122,15 @@ class PointLioNode final : public rclcpp::Node {
         10, parameter<std::int64_t>(*this, "mapping.initialization_points", 100)));
     parameters.point_filter = static_cast<std::size_t>(std::max<std::int64_t>(
         1, parameter<std::int64_t>(*this, "preprocess.point_filter_num", 2)));
+    parameters.maximum_tracking_points = static_cast<std::size_t>(
+        std::max<std::int64_t>(
+            2, parameter<std::int64_t>(
+                   *this, "mapping.max_tracking_points", 1200)));
+    parameters.point_time_bin_seconds = 1.0e-3 * parameter<double>(
+        *this, "mapping.point_time_bin_ms", 1.0);
+    if (parameters.point_time_bin_seconds < 0.0) {
+      throw std::runtime_error("mapping.point_time_bin_ms must be non-negative");
+    }
     parameters.nearby_type = parameter<int>(*this, "mapping.ivox_nearby_type", 18);
     parameters.estimate_extrinsics = parameter<bool>(*this, "mapping.extrinsic_est_en", false);
     parameters.gravity = vectorParameter(
@@ -136,6 +155,11 @@ class PointLioNode final : public rclcpp::Node {
     registered_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>("registered", output_qos);
     body_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>("registered_body", output_qos);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    state_callback_group_ = create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    state_timer_ = create_wall_timer(
+        std::chrono::duration<double>(1.0 / state_publish_rate_hz_),
+        std::bind(&PointLioNode::publishState, this), state_callback_group_);
     path_.header.frame_id = world_frame_;
     parameter_callback_ = add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &updated) {
@@ -168,6 +192,7 @@ class PointLioNode final : public rclcpp::Node {
             last_cpu_user_ = 0;
             origin_position_.setZero();
             last_position_for_distance_.setZero();
+            latest_state_.valid = false;
             RCLCPP_INFO(get_logger(), "Point-LIO state and map reset");
           }
           return response;
@@ -175,6 +200,12 @@ class PointLioNode final : public rclcpp::Node {
     declare_parameter<bool>("reset", false);
     RCLCPP_INFO(get_logger(), "Point-LIO: fused pointcloud + IMU, frames %s -> %s",
                 world_frame_.c_str(), body_frame_.c_str());
+    RCLCPP_INFO(
+        get_logger(),
+        "Point-LIO output: odometry/TF %.1f Hz, tracking point cap %zu, "
+        "point-time bin %.3f ms",
+        state_publish_rate_hz_, parameters.maximum_tracking_points,
+        parameters.point_time_bin_seconds * 1.0e3);
     RCLCPP_INFO(
         get_logger(),
         "Point-LIO covariance: lidar %.4g, IMU gyro %.4g, IMU accel %.4g; "
@@ -203,6 +234,15 @@ class PointLioNode final : public rclcpp::Node {
     double imu_rate = 0.0;
     double lidar_rate = 0.0;
     double imu_lead = 0.0;
+  };
+
+  struct PublishedState {
+    bool valid = false;
+    double stamp = 0.0;
+    Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
+    Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
   };
 
   static void recordRate(
@@ -304,7 +344,7 @@ class PointLioNode final : public rclcpp::Node {
       }
       ready = drainPendingLocked();
     }
-    for (const auto &item : ready) publish(item);
+    for (const auto &item : ready) publishScan(item);
   }
 
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
@@ -391,7 +431,7 @@ class PointLioNode final : public rclcpp::Node {
                              "waiting for enough IMU data and first map");
       }
     }
-    for (const auto &item : ready) publish(item);
+    for (const auto &item : ready) publishScan(item);
   }
 
   std::vector<PublishedResult> drainPendingLocked() {
@@ -421,25 +461,66 @@ class PointLioNode final : public rclcpp::Node {
     return ready;
   }
 
-  void publish(const PublishedResult &published) {
+  void publishState() {
+    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+    if (!latest_state_.valid) return;
+
+    const rclcpp::Time output_time = now();
+    const double requested_dt = output_time.seconds() - latest_state_.stamp;
+    const double dt = std::clamp(
+        requested_dt, 0.0, maximum_extrapolation_seconds_);
+    const Eigen::Vector3d position =
+        latest_state_.position + latest_state_.velocity * dt;
+    Eigen::Quaterniond orientation = latest_state_.orientation;
+    const double angular_speed = latest_state_.angular_velocity.norm();
+    if (angular_speed > 1.0e-9 && dt > 0.0) {
+      orientation = orientation * Eigen::Quaterniond(Eigen::AngleAxisd(
+          angular_speed * dt,
+          latest_state_.angular_velocity / angular_speed));
+      orientation.normalize();
+    }
+
+    nav_msgs::msg::Odometry odometry;
+    odometry.header.stamp = output_time;
+    odometry.header.frame_id = world_frame_;
+    odometry.child_frame_id = body_frame_;
+    odometry.pose.pose.position.x = position.x();
+    odometry.pose.pose.position.y = position.y();
+    odometry.pose.pose.position.z = position.z();
+    odometry.pose.pose.orientation.x = orientation.x();
+    odometry.pose.pose.orientation.y = orientation.y();
+    odometry.pose.pose.orientation.z = orientation.z();
+    odometry.pose.pose.orientation.w = orientation.w();
+    odometry.twist.twist.linear.x = latest_state_.velocity.x();
+    odometry.twist.twist.linear.y = latest_state_.velocity.y();
+    odometry.twist.twist.linear.z = latest_state_.velocity.z();
+    odometry.twist.twist.angular.x = latest_state_.angular_velocity.x();
+    odometry.twist.twist.angular.y = latest_state_.angular_velocity.y();
+    odometry.twist.twist.angular.z = latest_state_.angular_velocity.z();
+    odometry_publisher_->publish(odometry);
+
+    if (publish_tf_) {
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header = odometry.header;
+      transform.child_frame_id = body_frame_;
+      transform.transform.translation.x = position.x();
+      transform.transform.translation.y = position.y();
+      transform.transform.translation.z = position.z();
+      transform.transform.rotation = odometry.pose.pose.orientation;
+      tf_broadcaster_->sendTransform(transform);
+    }
+  }
+
+  void publishScan(const PublishedResult &published) {
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     const Result &result = published.result;
     const builtin_interfaces::msg::Time &stamp = published.stamp;
-    nav_msgs::msg::Odometry odometry;
-    odometry.header.stamp = stamp;
-    odometry.header.frame_id = world_frame_;
-    odometry.child_frame_id = body_frame_;
-    odometry.pose.pose.position.x = result.position.x();
-    odometry.pose.pose.position.y = result.position.y();
-    odometry.pose.pose.position.z = result.position.z();
-    odometry.pose.pose.orientation.x = result.orientation.x();
-    odometry.pose.pose.orientation.y = result.orientation.y();
-    odometry.pose.pose.orientation.z = result.orientation.z();
-    odometry.pose.pose.orientation.w = result.orientation.w();
-    odometry.twist.twist.linear.x = result.velocity.x();
-    odometry.twist.twist.linear.y = result.velocity.y();
-    odometry.twist.twist.linear.z = result.velocity.z();
-    odometry_publisher_->publish(odometry);
+    latest_state_.valid = true;
+    latest_state_.stamp = result.scan_end;
+    latest_state_.position = result.position;
+    latest_state_.orientation = result.orientation;
+    latest_state_.velocity = result.velocity;
+    latest_state_.angular_velocity = result.angular_velocity;
 
     sensor_msgs::msg::PointCloud2 registered;
     pcl::toROSMsg(*result.registered, registered);
@@ -453,23 +534,20 @@ class PointLioNode final : public rclcpp::Node {
     body_publisher_->publish(body);
 
     geometry_msgs::msg::PoseStamped pose;
-    pose.header = odometry.header;
-    pose.pose = odometry.pose.pose;
+    pose.header.stamp = stamp;
+    pose.header.frame_id = world_frame_;
+    pose.pose.position.x = result.position.x();
+    pose.pose.position.y = result.position.y();
+    pose.pose.position.z = result.position.z();
+    pose.pose.orientation.x = result.orientation.x();
+    pose.pose.orientation.y = result.orientation.y();
+    pose.pose.orientation.z = result.orientation.z();
+    pose.pose.orientation.w = result.orientation.w();
     if (publish_path_) {
       path_.header.stamp = stamp;
       path_.poses.push_back(pose);
       if (path_.poses.size() > path_capacity_) path_.poses.erase(path_.poses.begin());
       path_publisher_->publish(path_);
-    }
-    if (publish_tf_) {
-      geometry_msgs::msg::TransformStamped transform;
-      transform.header = odometry.header;
-      transform.child_frame_id = body_frame_;
-      transform.transform.translation.x = result.position.x();
-      transform.transform.translation.y = result.position.y();
-      transform.transform.translation.z = result.position.z();
-      transform.transform.rotation = odometry.pose.pose.orientation;
-      tf_broadcaster_->sendTransform(transform);
     }
     if (terminal_enabled_) printDashboard(published);
   }
@@ -629,6 +707,8 @@ class PointLioNode final : public rclcpp::Node {
   std::string body_frame_;
   bool publish_tf_ = true;
   bool publish_path_ = true;
+  double state_publish_rate_hz_ = 100.0;
+  double maximum_extrapolation_seconds_ = 0.05;
   bool terminal_enabled_ = true;
   bool terminal_clear_screen_ = true;
   bool imu_initialization_logged_ = false;
@@ -652,6 +732,7 @@ class PointLioNode final : public rclcpp::Node {
   clock_t last_cpu_user_ = 0;
   Eigen::Vector3d origin_position_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d last_position_for_distance_ = Eigen::Vector3d::Zero();
+  PublishedState latest_state_;
   std::mutex terminal_mutex_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription_;
@@ -660,6 +741,8 @@ class PointLioNode final : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_publisher_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  rclcpp::CallbackGroup::SharedPtr state_callback_group_;
+  rclcpp::TimerBase::SharedPtr state_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
       parameter_callback_;
 };

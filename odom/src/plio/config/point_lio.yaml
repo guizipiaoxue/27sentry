@@ -5,6 +5,9 @@
     publish.tf: true
     publish.path: true
     publish.path_capacity: 10000
+    publish.state_rate_hz: 100.0
+    # Bound constant-velocity/angular-velocity prediction between lidar updates.
+    publish.max_extrapolation_seconds: 0.05
     terminal.enabled: true
     terminal.clear_screen: true
 
@@ -31,6 +34,10 @@
     mapping.ivox_grid_resolution: 0.30
     mapping.ivox_nearby_type: 18
     mapping.initialization_points: 100
+    # Hard upper bound after voxel filtering, before point-wise matching.
+    mapping.max_tracking_points: 1200
+    # Batch points acquired within 1 ms into one filter update. Set 0 to disable.
+    mapping.point_time_bin_ms: 1.0
 
     imu.initialization_samples: 100
     imu.initialization_max_gyro_mean: 0.05

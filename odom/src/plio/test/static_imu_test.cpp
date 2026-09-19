@@ -39,6 +39,7 @@ plio::Result runStaticScenario(const Eigen::Vector3d &acceleration,
   parameters.initialization_samples = 100;
   parameters.initialization_points = 100;
   parameters.point_filter = 1;
+  parameters.maximum_tracking_points = 128;
   parameters.surface_leaf_size = 0.05;
   parameters.map_resolution = 0.10;
   plio::PointLioEstimator estimator(parameters);
@@ -104,7 +105,7 @@ int main() {
           1.0e-4 ||
       !near(result.gravity, Eigen::Vector3d(0.0, 0.0, -kGravity), 1.0e-9) ||
       result.gyro_bias.norm() > 1.0e-12 ||
-      result.accel_bias.norm() > 1.0e-12 || result.filtered_points == 0 ||
+      result.accel_bias.norm() > 1.0e-12 || result.filtered_points != 128 ||
       result.matched_points == 0 || result.map_voxels == 0 ||
       std::abs((result.scan_end - result.scan_start) - 0.09) > 1.0e-6) {
     std::cerr << "static estimate drifted: position="

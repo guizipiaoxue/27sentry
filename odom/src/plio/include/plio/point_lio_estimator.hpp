@@ -43,6 +43,8 @@ struct Parameters {
   double initialization_max_gravity_error = 0.75;
   std::size_t initialization_points = 100;
   std::size_t point_filter = 2;
+  std::size_t maximum_tracking_points = 1200;
+  double point_time_bin_seconds = 0.001;
   int nearby_type = 18;
   bool estimate_extrinsics = false;
   Eigen::Vector3d gravity = Eigen::Vector3d(0.0, 0.0, -9.80665);

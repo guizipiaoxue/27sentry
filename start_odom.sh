@@ -158,6 +158,10 @@ LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
 DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
 FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
 IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
+RAW_LIDAR5_TOPIC="/sentry/raw/lidar5"
+RAW_LIDAR3_TOPIC="/sentry/raw/lidar3"
+RAW_IMU5_TOPIC="/sentry/raw/imu5"
+RAW_IMU3_TOPIC="/sentry/raw/imu3"
 
 if [[ "${RECORD_ROSBAG}" != "0" && "${RECORD_ROSBAG}" != "1" ]]; then
   echo "[start_odom] RECORD_ROSBAG must be 0 or 1." >&2
@@ -217,6 +221,20 @@ for package_executable in "${REQUIRED_EXECUTABLES[@]}"; do
   fi
 done
 
+# Starting a second pipeline can mix old and new publishers on the same ROS
+# graph and can associate multiple message types with one Livox topic.
+STALE_PIPELINE_PROCESSES="$(
+  pgrep -a -f \
+    'livox_ros_driver2/lib/livox_ros_driver2/livox_ros_driver2_node|fusion_ws/lib/fusion_ws/fusion_pcl|plio/lib/plio/point_lio|odom_ws/lib/odom_ws/odom' \
+    || true
+)"
+if [[ -n "${STALE_PIPELINE_PROCESSES}" ]]; then
+  echo "[start_odom] Another odometry pipeline is still running:" >&2
+  echo "${STALE_PIPELINE_PROCESSES}" >&2
+  echo "[start_odom] Stop those processes before starting a new run." >&2
+  exit 1
+fi
+
 DRIVER_PID=""
 FUSION_PID=""
 ODOM_PID=""
@@ -271,6 +289,10 @@ cleanup() {
 
   printf '\n[start_odom] Stopping all nodes...\n' >&2
   stop_pipeline_processes TERM
+  # Point-LIO may be inside a long point-wise update and not return to the ROS
+  # executor promptly. Stop the processing groups before waiting for bag flush.
+  sleep 0.5
+  stop_pipeline_processes KILL
   if [[ -n "${BAG_PID}" ]]; then
     printf '[start_odom] Finalizing rosbag: %s\n' "${ROSBAG_OUTPUT}" >&2
     stop_process_group "${BAG_PID}" TERM
@@ -282,8 +304,6 @@ cleanup() {
     done
     stop_process_group "${BAG_PID}" KILL
   fi
-  sleep 0.5
-  stop_pipeline_processes KILL
   wait 2>/dev/null || true
   exit "${status}"
 }
@@ -303,6 +323,10 @@ DRIVER_ARGS=(
   -p output_data_type:=0
   -p frame_id:=livox_frame
   -p user_config_path:="${LIVOX_CONFIG}"
+  -r "/livox/lidar_192_168_1_5:=${RAW_LIDAR5_TOPIC}"
+  -r "/livox/lidar_192_168_1_3:=${RAW_LIDAR3_TOPIC}"
+  -r "/livox/imu_192_168_1_5:=${RAW_IMU5_TOPIC}"
+  -r "/livox/imu_192_168_1_3:=${RAW_IMU3_TOPIC}"
 )
 if [[ -n "${LIVOX_BROADCAST_CODE}" ]]; then
   DRIVER_ARGS+=( -p cmdline_input_bd_code:="${LIVOX_BROADCAST_CODE}" )
@@ -320,10 +344,10 @@ fi
 
 if [[ "${RECORD_ROSBAG}" == "1" ]]; then
   ROSBAG_TOPICS=(
-    /livox/lidar_192_168_1_5
-    /livox/lidar_192_168_1_3
-    /livox/imu_192_168_1_5
-    /livox/imu_192_168_1_3
+    "${RAW_LIDAR5_TOPIC}"
+    "${RAW_LIDAR3_TOPIC}"
+    "${RAW_IMU5_TOPIC}"
+    "${RAW_IMU3_TOPIC}"
     /gimbal/cloud_fused
     /gimbal/imu_fused
     /gimbal/imu_calibrated
@@ -354,7 +378,11 @@ fi
 
 echo "[start_odom] Starting point-cloud and IMU fusion..."
 setsid ros2 run fusion_ws fusion_pcl --ros-args \
-  -p imu_accel_unit:=auto &
+  -p imu_accel_unit:=auto \
+  -p "lidar5_topic:=${RAW_LIDAR5_TOPIC}" \
+  -p "lidar3_topic:=${RAW_LIDAR3_TOPIC}" \
+  -p "imu5_topic:=${RAW_IMU5_TOPIC}" \
+  -p "imu3_topic:=${RAW_IMU3_TOPIC}" &
 FUSION_PID=$!
 sleep "${FUSION_STARTUP_WAIT}"
 if ! kill -0 "${FUSION_PID}" 2>/dev/null; then

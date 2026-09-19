@@ -76,7 +76,7 @@ class FusionPcl final : public rclcpp::Node {
         "imu_calibration_min_samples", 400);
     gravity_ = declare_parameter<double>("gravity", 9.80665);
     imu_accel_unit_ = declare_parameter<std::string>(
-        "imu_accel_unit", "m/s^2");
+        "imu_accel_unit", "auto");
     max_gyro_stddev_ = declare_parameter<double>(
         "max_calibration_gyro_stddev", 0.02);
     max_gyro_mean_ = declare_parameter<double>(
@@ -542,7 +542,7 @@ class FusionPcl final : public rclcpp::Node {
   std::string cloud_output_topic_;
   std::string imu_output_topic_;
   std::string frame_id_;
-  std::string imu_accel_unit_ = "m/s^2";
+  std::string imu_accel_unit_ = "auto";
   double cloud_sync_tolerance_ = 0.03;
   double imu_interpolation_max_gap_ = 0.020;
   double imu_calibration_seconds_ = 3.0;

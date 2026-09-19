@@ -260,7 +260,7 @@ fi
 
 echo "[start_odom] Starting point-cloud and IMU fusion..."
 setsid ros2 run fusion_ws fusion_pcl --ros-args \
-  -p imu_accel_unit:=m/s^2 &
+  -p imu_accel_unit:=auto &
 FUSION_PID=$!
 sleep "${FUSION_STARTUP_WAIT}"
 if ! kill -0 "${FUSION_PID}" 2>/dev/null; then

@@ -19,9 +19,11 @@ MTK_BUILD_MANIFOLD(State,
 ((SO3, offset_R_L_I))
 ((Vect3, offset_T_L_I))
 ((Vect3, vel))
+((Vect3, omg))
+((Vect3, acc))
+((Vect3, gravity))
 ((Vect3, bg))
 ((Vect3, ba))
-((Vect3, gravity))
 );
 
 MTK_BUILD_MANIFOLD(Input,
@@ -29,15 +31,16 @@ MTK_BUILD_MANIFOLD(Input,
 ((Vect3, gyro))
 );
 
-using Filter = esekfom::esekf<State, 24, Input>;
+using Filter = esekfom::esekf<State, 30, Input>;
 using Point = pcl::PointXYZINormal;
 using Cloud = pcl::PointCloud<Point>;
 using PointVector = std::vector<Point, Eigen::aligned_allocator<Point>>;
 using IVox = faster_lio::IVox<3, faster_lio::IVoxNodeType::DEFAULT, Point>;
 
-Eigen::Matrix<double, 24, 1> processModel(State &state, const Input &input);
-Eigen::Matrix<double, 24, 24> processJacobian(State &state, const Input &input);
-Eigen::Matrix<double, 24, 24> processNoise(
-    double gyro, double accel, double gyro_bias, double accel_bias);
+Eigen::Matrix<double, 30, 1> processModel(State &state, const Input &input);
+Eigen::Matrix<double, 30, 30> processJacobian(State &state, const Input &input);
+Eigen::Matrix<double, 30, 30> processNoise(
+    double velocity, double omega, double acceleration,
+    double gyro_bias, double accel_bias);
 
 }  // namespace plio::core

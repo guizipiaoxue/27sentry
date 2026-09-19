@@ -13,41 +13,39 @@
 
 namespace plio::core {
 
-Eigen::Matrix<double, 24, 1> processModel(State &state, const Input &input) {
-  Eigen::Matrix<double, 24, 1> result = Eigen::Matrix<double, 24, 1>::Zero();
-  Vect3 omega;
-  input.gyro.boxminus(omega, state.bg);
-  const Vect3 acceleration = state.rot * (input.acc - state.ba);
+Eigen::Matrix<double, 30, 1> processModel(State &state, const Input &) {
+  Eigen::Matrix<double, 30, 1> result = Eigen::Matrix<double, 30, 1>::Zero();
+  const Vect3 acceleration = state.rot * state.acc;
   for (int i = 0; i < 3; ++i) {
     result(i) = state.vel[i];
-    result(i + 3) = omega[i];
+    result(i + 3) = state.omg[i];
     result(i + 12) = acceleration[i] + state.gravity[i];
   }
   return result;
 }
 
-Eigen::Matrix<double, 24, 24> processJacobian(
-    State &state, const Input &input) {
-  Eigen::Matrix<double, 24, 24> jacobian =
-      Eigen::Matrix<double, 24, 24>::Zero();
+Eigen::Matrix<double, 30, 30> processJacobian(
+    State &state, const Input &) {
+  Eigen::Matrix<double, 30, 30> jacobian =
+      Eigen::Matrix<double, 30, 30>::Zero();
   jacobian.block<3, 3>(0, 12).setIdentity();
-  Vect3 acceleration;
-  input.acc.boxminus(acceleration, state.ba);
-  jacobian.block<3, 3>(12, 3) = -state.rot * MTK::hat(acceleration);
-  jacobian.block<3, 3>(12, 18) = -state.rot;
+  jacobian.block<3, 3>(3, 15).setIdentity();
+  jacobian.block<3, 3>(12, 3) = -state.rot * MTK::hat(state.acc);
+  jacobian.block<3, 3>(12, 18) = state.rot;
   jacobian.block<3, 3>(12, 21).setIdentity();
-  jacobian.block<3, 3>(3, 15) = -Eigen::Matrix3d::Identity();
   return jacobian;
 }
 
-Eigen::Matrix<double, 24, 24> processNoise(
-    double gyro, double accel, double gyro_bias, double accel_bias) {
-  Eigen::Matrix<double, 24, 24> noise =
-      Eigen::Matrix<double, 24, 24>::Zero();
-  noise.block<3, 3>(3, 3).diagonal().setConstant(gyro);
-  noise.block<3, 3>(12, 12).diagonal().setConstant(accel);
-  noise.block<3, 3>(15, 15).diagonal().setConstant(gyro_bias);
-  noise.block<3, 3>(18, 18).diagonal().setConstant(accel_bias);
+Eigen::Matrix<double, 30, 30> processNoise(
+    double velocity, double omega, double acceleration,
+    double gyro_bias, double accel_bias) {
+  Eigen::Matrix<double, 30, 30> noise =
+      Eigen::Matrix<double, 30, 30>::Zero();
+  noise.block<3, 3>(12, 12).diagonal().setConstant(velocity);
+  noise.block<3, 3>(15, 15).diagonal().setConstant(omega);
+  noise.block<3, 3>(18, 18).diagonal().setConstant(acceleration);
+  noise.block<3, 3>(24, 24).diagonal().setConstant(gyro_bias);
+  noise.block<3, 3>(27, 27).diagonal().setConstant(accel_bias);
   return noise;
 }
 
@@ -74,6 +72,40 @@ struct MeasurementContext {
 };
 
 thread_local MeasurementContext *measurement_context = nullptr;
+
+struct ImuMeasurementContext {
+  const ImuSample *sample = nullptr;
+  double gyro_covariance = 0.01;
+  double accel_covariance = 0.01;
+};
+
+thread_local ImuMeasurementContext *imu_measurement_context = nullptr;
+
+void imuMeasurement(
+    core::State &state, esekfom::dyn_share_modified<double> &data) {
+  data.satu_check[0] = false;
+  data.satu_check[1] = false;
+  data.satu_check[2] = false;
+  data.satu_check[3] = false;
+  data.satu_check[4] = false;
+  data.satu_check[5] = false;
+  if (imu_measurement_context == nullptr ||
+      imu_measurement_context->sample == nullptr) {
+    data.z_IMU.setZero();
+    data.R_IMU.setOnes();
+    return;
+  }
+
+  const ImuSample &sample = *imu_measurement_context->sample;
+  const Eigen::Vector3d predicted_gyro = state.omg + state.bg;
+  const Eigen::Vector3d predicted_accel = state.acc + state.ba;
+  data.z_IMU.head<3>() = sample.angular_velocity - predicted_gyro;
+  data.z_IMU.tail<3>() = sample.acceleration - predicted_accel;
+  data.R_IMU.head<3>().setConstant(
+      imu_measurement_context->gyro_covariance);
+  data.R_IMU.tail<3>().setConstant(
+      imu_measurement_context->accel_covariance);
+}
 
 Eigen::Vector3d pointInImu(const core::State &state, const Point &point) {
   const Eigen::Vector3d lidar(point.x, point.y, point.z);
@@ -199,14 +231,17 @@ class PointLioEstimator::Impl {
     imu_for_initialization_.clear();
     initialized_ = false;
     map_initialized_ = false;
+    initialization_report_ = {};
     last_prediction_time_ = -1.0;
     filter_ = core::Filter();
-    filter_.init_dyn_share_modified_2h(
-        core::processModel, core::processJacobian, lidarMeasurement);
-    Eigen::Matrix<double, 24, 24> covariance =
-        Eigen::Matrix<double, 24, 24>::Identity() * 0.1;
-    covariance.block<3, 3>(21, 21) *= 1.0e-3;
-    covariance.block<6, 6>(15, 15) *= 1.0e-2;
+    filter_.init_dyn_share_modified_3h(
+        core::processModel, core::processJacobian, lidarMeasurement,
+        imuMeasurement);
+    Eigen::Matrix<double, 30, 30> covariance =
+        Eigen::Matrix<double, 30, 30>::Identity() * 0.01;
+    covariance.block<3, 3>(21, 21).diagonal().setConstant(1.0e-4);
+    covariance.block<3, 3>(24, 24).diagonal().setConstant(1.0e-3);
+    covariance.block<3, 3>(27, 27).diagonal().setConstant(1.0e-3);
     filter_.change_P(covariance);
     filter_.x_.offset_R_L_I = parameters_.lidar_to_imu_rotation;
     filter_.x_.offset_T_L_I = parameters_.lidar_to_imu_translation;
@@ -228,7 +263,8 @@ class PointLioEstimator::Impl {
         parameters_.surface_leaf_size, parameters_.surface_leaf_size,
         parameters_.surface_leaf_size);
     noise_ = core::processNoise(
-        parameters_.gyro_covariance, parameters_.accel_covariance,
+        parameters_.velocity_covariance, parameters_.gyro_covariance,
+        parameters_.accel_covariance,
         parameters_.gyro_bias_covariance, parameters_.accel_bias_covariance);
   }
 
@@ -296,6 +332,9 @@ class PointLioEstimator::Impl {
       result.waiting_for_imu = true;
       return result;
     }
+    if (scan_end <= last_prediction_time_) {
+      return result;
+    }
 
     Cloud world;
     world.resize(filtered->size());
@@ -354,6 +393,10 @@ class PointLioEstimator::Impl {
 
   bool initialized() const { return initialized_; }
 
+  ImuInitializationReport initializationReport() const {
+    return initialization_report_;
+  }
+
  private:
   void initializeImu() {
     if (imu_for_initialization_.size() < parameters_.initialization_samples) {
@@ -371,13 +414,20 @@ class PointLioEstimator::Impl {
       return;
     }
 
-    // The fused IMU is already calibrated into the gimbal frame.  Use the
-    // stationary mean only for initial roll/pitch and residual gyro bias.
-    const Eigen::Quaterniond alignment = Eigen::Quaterniond::FromTwoVectors(
-        acceleration.normalized(), -parameters_.gravity.normalized());
-    filter_.x_.rot = alignment.toRotationMatrix();
+    // Keep odom coincident with the initial gimbal frame. As in Point-LIO and
+    // DLIO, initialize the world gravity vector from the measured direction.
+    filter_.x_.gravity =
+        -acceleration.normalized() * parameters_.gravity.norm();
+    filter_.x_.acc = -filter_.x_.gravity;
+    filter_.x_.omg.setZero();
     filter_.x_.bg = gyro;
-    filter_.x_.ba.setZero();
+    filter_.x_.ba = acceleration - filter_.x_.acc;
+    initialization_report_.valid = true;
+    initialization_report_.samples = imu_for_initialization_.size();
+    initialization_report_.mean_acceleration = acceleration;
+    initialization_report_.gravity = filter_.x_.gravity;
+    initialization_report_.gyro_bias = filter_.x_.bg;
+    initialization_report_.accel_bias = filter_.x_.ba;
     initialized_ = true;
     last_prediction_time_ = imu_for_initialization_.back().stamp;
   }
@@ -388,29 +438,35 @@ class PointLioEstimator::Impl {
       return;
     }
     while (!imu_.empty() && imu_.front().stamp <= target) {
-      if (imu_.front().stamp > last_prediction_time_) {
-        predict(imu_.front(), imu_.front().stamp - last_prediction_time_);
-        last_prediction_time_ = imu_.front().stamp;
-      }
-      if (imu_.size() == 1) {
-        break;
-      }
+      const ImuSample sample = imu_.front();
       imu_.pop_front();
+      if (sample.stamp <= last_prediction_time_) continue;
+      predict(sample.stamp - last_prediction_time_);
+      last_prediction_time_ = sample.stamp;
+      updateImu(sample);
     }
-    if (!imu_.empty() && target > last_prediction_time_) {
-      predict(imu_.front(), target - last_prediction_time_);
+    if (target > last_prediction_time_) {
+      predict(target - last_prediction_time_);
       last_prediction_time_ = target;
     }
   }
 
-  void predict(const ImuSample &sample, double interval) {
+  void predict(double interval) {
     if (!(interval > 0.0) || interval > 0.5) {
       return;
     }
     core::Input input;
-    input.acc = sample.acceleration;
-    input.gyro = sample.angular_velocity;
     filter_.predict(interval, noise_, input, true, true);
+  }
+
+  void updateImu(const ImuSample &sample) {
+    ImuMeasurementContext context;
+    context.sample = &sample;
+    context.gyro_covariance = parameters_.imu_gyro_measurement_covariance;
+    context.accel_covariance = parameters_.imu_accel_measurement_covariance;
+    imu_measurement_context = &context;
+    filter_.update_iterated_dyn_share_IMU();
+    imu_measurement_context = nullptr;
   }
 
   void discardImuBefore(double stamp) {
@@ -421,13 +477,14 @@ class PointLioEstimator::Impl {
 
   Parameters parameters_;
   core::Filter filter_;
-  Eigen::Matrix<double, 24, 24> noise_;
+  Eigen::Matrix<double, 30, 30> noise_;
   pcl::VoxelGrid<Point> voxel_;
   std::unique_ptr<core::IVox> map_;
   std::deque<ImuSample> imu_;
   std::deque<ImuSample> imu_for_initialization_;
   bool initialized_ = false;
   bool map_initialized_ = false;
+  ImuInitializationReport initialization_report_;
   double last_prediction_time_ = -1.0;
 };
 
@@ -443,5 +500,8 @@ Result PointLioEstimator::process(const Cloud::ConstPtr &cloud, double stamp) {
 }
 void PointLioEstimator::reset() { impl_->reset(); }
 bool PointLioEstimator::initialized() const { return impl_->initialized(); }
+ImuInitializationReport PointLioEstimator::initializationReport() const {
+  return impl_->initializationReport();
+}
 
 }  // namespace plio

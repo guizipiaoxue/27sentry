@@ -379,27 +379,25 @@ class FusionPcl final : public rclcpp::Node {
       return;
     }
 
-    const Eigen::Matrix3d nominal_rotation =
-        transforms_[index].block<3, 3>(0, 0);
-    const Eigen::Vector3d measured_gravity = nominal_rotation * accel_mean;
-    const Eigen::Quaterniond gravity_alignment =
-        Eigen::Quaterniond::FromTwoVectors(
-            measured_gravity.normalized(), Eigen::Vector3d::UnitZ());
-    calibration.imu_to_gimbal =
-        gravity_alignment.toRotationMatrix() * nominal_rotation;
+    calibration.imu_to_gimbal = transforms_[index].block<3, 3>(0, 0);
     calibration.gyro_bias = gyro_mean;
-    calibration.accel_bias_gimbal =
-        calibration.imu_to_gimbal * accel_mean -
-        Eigen::Vector3d(0.0, 0.0, gravity_);
+    const Eigen::Vector3d measured_gravity =
+        calibration.imu_to_gimbal * accel_mean;
+    // As in DLIO initialization, gravity direction is attitude, not an IMU
+    // extrinsic or accelerometer bias. Preserve it and only remove the static
+    // magnitude residual; Point-LIO initializes world gravity from the fused
+    // direction.
+    calibration.accel_bias_gimbal = measured_gravity -
+        measured_gravity.normalized() * gravity_;
     calibration.complete = true;
 
     RCLCPP_INFO(
         get_logger(),
         "lidar%zu IMU calibrated with %zu samples; accel input unit: %s; "
-        "gyro bias [%.6f %.6f %.6f]",
+        "accel norm %.5f m/s^2, std %.5f; gyro bias [%.6f %.6f %.6f]",
         index == 0 ? 5UL : 3UL, calibration.samples,
-        calibration.accel_scale == 1.0 ? "m/s^2" : "g", gyro_mean.x(),
-        gyro_mean.y(), gyro_mean.z());
+        calibration.accel_scale == 1.0 ? "m/s^2" : "g", accel_mean.norm(),
+        accel_stddev, gyro_mean.x(), gyro_mean.y(), gyro_mean.z());
 
     if (calibrations_[0].complete && calibrations_[1].complete) {
       imu_calibration_complete_ = true;

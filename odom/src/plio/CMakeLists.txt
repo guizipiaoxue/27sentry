@@ -33,6 +33,16 @@ install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 install(FILES LICENSE POINT_LIO_LICENSE DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  enable_testing()
+  add_executable(static_imu_test
+    test/static_imu_test.cpp
+    src/point_lio_estimator.cpp)
+  target_compile_features(static_imu_test PRIVATE cxx_std_17)
+  target_include_directories(
+    static_imu_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  target_link_libraries(static_imu_test ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
+  add_test(NAME static_imu_test COMMAND static_imu_test)
+
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)

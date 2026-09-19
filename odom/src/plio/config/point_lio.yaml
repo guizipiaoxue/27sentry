@@ -17,9 +17,13 @@
     mapping.det_range: 100.0
     mapping.plane_thr: 0.10
     mapping.match_s: 81.0
-    mapping.lidar_meas_cov: 0.10
-    mapping.gyr_cov_input: 0.10
-    mapping.acc_cov_input: 0.10
+    # MID360 Point-LIO R (measurement) and Q (process) covariance defaults.
+    mapping.lidar_meas_cov: 0.01
+    mapping.imu_meas_omg_cov: 0.01
+    mapping.imu_meas_acc_cov: 0.01
+    mapping.velocity_cov: 20.0
+    mapping.gyr_cov_input: 1000.0
+    mapping.acc_cov_input: 500.0
     mapping.b_gyr_cov: 1.0e-4
     mapping.b_acc_cov: 1.0e-4
     mapping.ivox_grid_resolution: 0.30

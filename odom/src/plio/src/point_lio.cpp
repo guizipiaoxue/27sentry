@@ -77,9 +77,12 @@ class PointLioNode final : public rclcpp::Node {
     parameters.detection_range = parameter<double>(*this, "mapping.det_range", 100.0);
     parameters.plane_threshold = parameter<double>(*this, "mapping.plane_thr", 0.10);
     parameters.match_scale = parameter<double>(*this, "mapping.match_s", 81.0);
-    parameters.lidar_measurement_covariance = parameter<double>(*this, "mapping.lidar_meas_cov", 0.10);
-    parameters.gyro_covariance = parameter<double>(*this, "mapping.gyr_cov_input", 0.10);
-    parameters.accel_covariance = parameter<double>(*this, "mapping.acc_cov_input", 0.10);
+    parameters.lidar_measurement_covariance = parameter<double>(*this, "mapping.lidar_meas_cov", 0.01);
+    parameters.imu_gyro_measurement_covariance = parameter<double>(*this, "mapping.imu_meas_omg_cov", 0.01);
+    parameters.imu_accel_measurement_covariance = parameter<double>(*this, "mapping.imu_meas_acc_cov", 0.01);
+    parameters.velocity_covariance = parameter<double>(*this, "mapping.velocity_cov", 20.0);
+    parameters.gyro_covariance = parameter<double>(*this, "mapping.gyr_cov_input", 1000.0);
+    parameters.accel_covariance = parameter<double>(*this, "mapping.acc_cov_input", 500.0);
     parameters.gyro_bias_covariance = parameter<double>(*this, "mapping.b_gyr_cov", 1.0e-4);
     parameters.accel_bias_covariance = parameter<double>(*this, "mapping.b_acc_cov", 1.0e-4);
     parameters.initialization_samples = static_cast<std::size_t>(std::max<std::int64_t>(
@@ -123,6 +126,7 @@ class PointLioNode final : public rclcpp::Node {
                           })) {
             std::lock_guard<std::mutex> lock(mutex_);
             estimator_->reset();
+            imu_initialization_logged_ = false;
             pending_clouds_.clear();
             path_.poses.clear();
             RCLCPP_INFO(get_logger(), "Point-LIO state and map reset");
@@ -158,6 +162,22 @@ class PointLioNode final : public rclcpp::Node {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       estimator_->addImu(sample);
+      if (!imu_initialization_logged_ && estimator_->initialized()) {
+        const ImuInitializationReport report =
+            estimator_->initializationReport();
+        RCLCPP_INFO(
+            get_logger(),
+            "Point-LIO IMU initialized with %zu samples; mean accel norm "
+            "%.6f m/s^2 [%.6f %.6f %.6f]; gravity [%.6f %.6f %.6f]; "
+            "gyro bias [%.6f %.6f %.6f]; accel bias [%.6f %.6f %.6f]",
+            report.samples, report.mean_acceleration.norm(),
+            report.mean_acceleration.x(), report.mean_acceleration.y(),
+            report.mean_acceleration.z(), report.gravity.x(),
+            report.gravity.y(), report.gravity.z(), report.gyro_bias.x(),
+            report.gyro_bias.y(), report.gyro_bias.z(), report.accel_bias.x(),
+            report.accel_bias.y(), report.accel_bias.z());
+        imu_initialization_logged_ = true;
+      }
       ready = drainPendingLocked();
     }
     for (const auto &item : ready) publish(item.result, item.stamp);
@@ -214,6 +234,7 @@ class PointLioNode final : public rclcpp::Node {
     }
 
     std::vector<PublishedResult> ready;
+    bool imu_initialized = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       pending_clouds_.push_back({cloud, message->header.stamp});
@@ -223,10 +244,16 @@ class PointLioNode final : public rclcpp::Node {
                              "dropping oldest cloud while waiting for fused IMU");
       }
       ready = drainPendingLocked();
+      imu_initialized = estimator_->initialized();
     }
     if (ready.empty()) {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "waiting for fused IMU initialization and first map");
+      if (!imu_initialized) {
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "waiting for fused IMU initialization");
+      } else {
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "waiting for enough IMU data and first map");
+      }
     }
     for (const auto &item : ready) publish(item.result, item.stamp);
   }
@@ -299,6 +326,7 @@ class PointLioNode final : public rclcpp::Node {
   std::string body_frame_;
   bool publish_tf_ = true;
   bool publish_path_ = true;
+  bool imu_initialization_logged_ = false;
   std::size_t path_capacity_ = 10000;
   nav_msgs::msg::Path path_;
   static constexpr std::size_t maximum_pending_clouds_ = 20;

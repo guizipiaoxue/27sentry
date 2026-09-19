@@ -28,9 +28,12 @@ struct Parameters {
   double detection_range = 100.0;
   double plane_threshold = 0.10;
   double match_scale = 81.0;
-  double lidar_measurement_covariance = 0.10;
-  double gyro_covariance = 0.10;
-  double accel_covariance = 0.10;
+  double lidar_measurement_covariance = 0.01;
+  double imu_gyro_measurement_covariance = 0.01;
+  double imu_accel_measurement_covariance = 0.01;
+  double velocity_covariance = 20.0;
+  double gyro_covariance = 1000.0;
+  double accel_covariance = 500.0;
   double gyro_bias_covariance = 1.0e-4;
   double accel_bias_covariance = 1.0e-4;
   std::size_t initialization_samples = 100;
@@ -54,6 +57,15 @@ struct Result {
   Cloud::Ptr body{new Cloud};
 };
 
+struct ImuInitializationReport {
+  bool valid = false;
+  std::size_t samples = 0;
+  Eigen::Vector3d mean_acceleration = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gravity = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gyro_bias = Eigen::Vector3d::Zero();
+  Eigen::Vector3d accel_bias = Eigen::Vector3d::Zero();
+};
+
 class PointLioEstimator {
  public:
   explicit PointLioEstimator(Parameters parameters);
@@ -67,6 +79,7 @@ class PointLioEstimator {
   Result process(const Cloud::ConstPtr &cloud, double stamp);
   void reset();
   bool initialized() const;
+  ImuInitializationReport initializationReport() const;
 
  private:
   class Impl;

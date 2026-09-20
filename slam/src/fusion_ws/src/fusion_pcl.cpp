@@ -1,5 +1,3 @@
-#define PCL_NO_PRECOMPILE
-
 // Use the calibrated lidar-to-gimbal transforms to fuse lidar 5 and lidar 3.
 // Cloud pairs are published at the lidar rate (about 10 Hz), while synchronized
 // IMU pairs are rotated into the gimbal frame, averaged, and published at the
@@ -24,7 +22,6 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <pcl/common/transforms.h>
-#include <pcl/filters/voxel_grid.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -71,8 +68,6 @@ class FusionPcl final : public rclcpp::Node {
     frame_id_ = declare_parameter<std::string>("frame_id", "gimbal");
     cloud_sync_tolerance_ = declare_parameter<double>(
         "cloud_sync_tolerance", 0.03);
-    cloud_voxel_leaf_size_ = declare_parameter<double>(
-        "cloud_voxel_leaf_size", 0.08);
     imu_interpolation_max_gap_ = declare_parameter<double>(
         "imu_interpolation_max_gap", 0.020);
     imu_calibration_seconds_ = declare_parameter<double>(
@@ -92,11 +87,11 @@ class FusionPcl final : public rclcpp::Node {
         "max_calibration_gravity_error", 0.75);
     max_queue_size_ = static_cast<std::size_t>(std::max<std::int64_t>(
         2, declare_parameter<std::int64_t>("max_queue_size", 100)));
-    if (!(cloud_sync_tolerance_ > 0.0) || cloud_voxel_leaf_size_ < 0.0 ||
+    if (!(cloud_sync_tolerance_ > 0.0) ||
         !(imu_interpolation_max_gap_ > 0.0)) {
       throw std::runtime_error(
-          "cloud_sync_tolerance and imu_interpolation_max_gap must be "
-          "positive; cloud_voxel_leaf_size must be non-negative");
+          "cloud_sync_tolerance and imu_interpolation_max_gap must be in "
+          "positive seconds");
     }
     if (imu_accel_unit_ != "m/s^2" && imu_accel_unit_ != "mps2" &&
         imu_accel_unit_ != "g" && imu_accel_unit_ != "auto") {
@@ -155,10 +150,6 @@ class FusionPcl final : public rclcpp::Node {
     RCLCPP_INFO(
         get_logger(), "configured raw IMU acceleration unit: %s",
         imu_accel_unit_.c_str());
-    RCLCPP_INFO(
-        get_logger(), "fused cloud voxel leaf size: %.3f m%s",
-        cloud_voxel_leaf_size_,
-        cloud_voxel_leaf_size_ > 0.0 ? "" : " (disabled)");
   }
 
  private:
@@ -253,17 +244,6 @@ class FusionPcl final : public rclcpp::Node {
     return output;
   }
 
-  Cloud::Ptr downsampleCloud(const Cloud::Ptr &input) const {
-    if (cloud_voxel_leaf_size_ <= 0.0 || input->empty()) return input;
-    pcl::VoxelGrid<TimedPoint> voxel;
-    const float leaf = static_cast<float>(cloud_voxel_leaf_size_);
-    voxel.setLeafSize(leaf, leaf, leaf);
-    voxel.setInputCloud(input);
-    Cloud::Ptr output(new Cloud);
-    voxel.filter(*output);
-    return output;
-  }
-
   template <typename MessageT>
   void limitQueue(std::deque<TimedMessage<MessageT>> &queue) {
     while (queue.size() > max_queue_size_) {
@@ -308,12 +288,12 @@ class FusionPcl final : public rclcpp::Node {
     // acquisition times remain correct even when the earlier packet is first.
     const rclcpp::Time output_stamp =
         lidar5.stamp >= lidar3.stamp ? lidar5.stamp : lidar3.stamp;
-    Cloud::Ptr fused = downsampleCloud(transformCloud(
+    Cloud::Ptr fused = transformCloud(
         *lidar5.message, transforms_[0],
-        (lidar5.stamp - output_stamp).seconds()));
-    const Cloud::Ptr cloud3 = downsampleCloud(transformCloud(
+        (lidar5.stamp - output_stamp).seconds());
+    const Cloud::Ptr cloud3 = transformCloud(
         *lidar3.message, transforms_[1],
-        (lidar3.stamp - output_stamp).seconds()));
+        (lidar3.stamp - output_stamp).seconds());
     *fused += *cloud3;
 
     sensor_msgs::msg::PointCloud2 output;
@@ -564,7 +544,6 @@ class FusionPcl final : public rclcpp::Node {
   std::string frame_id_;
   std::string imu_accel_unit_ = "auto";
   double cloud_sync_tolerance_ = 0.03;
-  double cloud_voxel_leaf_size_ = 0.08;
   double imu_interpolation_max_gap_ = 0.020;
   double imu_calibration_seconds_ = 3.0;
   std::int64_t imu_calibration_min_samples_ = 400;

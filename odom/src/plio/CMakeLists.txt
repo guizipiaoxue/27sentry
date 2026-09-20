@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(plio)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -42,6 +46,16 @@ if(BUILD_TESTING)
     static_imu_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
   target_link_libraries(static_imu_test ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
   add_test(NAME static_imu_test COMMAND static_imu_test)
+
+  add_executable(imu_prediction_test test/imu_prediction_test.cpp)
+  target_compile_features(imu_prediction_test PRIVATE cxx_std_17)
+  target_include_directories(imu_prediction_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  add_test(NAME imu_prediction_test COMMAND imu_prediction_test)
+  add_executable(lidar_covariance_test test/lidar_covariance_test.cpp src/point_lio_estimator.cpp)
+  target_compile_features(lidar_covariance_test PRIVATE cxx_std_17)
+  target_include_directories(lidar_covariance_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  target_link_libraries(lidar_covariance_test ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
+  add_test(NAME lidar_covariance_test COMMAND lidar_covariance_test)
 
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)

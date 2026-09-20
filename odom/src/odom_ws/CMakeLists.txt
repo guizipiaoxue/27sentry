@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(odom_ws)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -21,17 +25,19 @@ find_package(loop_closure REQUIRED)
 
 set(DLIO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../direct_lidar_inertial_odometry)
 
-add_executable(odom
-  src/odom.cpp
-  ${DLIO_ROOT}/src/dlio/odom.cc
+add_library(dlio_registration STATIC
   ${DLIO_ROOT}/src/nano_gicp/lsq_registration.cc
   ${DLIO_ROOT}/src/nano_gicp/nano_gicp.cc
   ${DLIO_ROOT}/src/nano_gicp/nanoflann.cc)
+target_compile_features(dlio_registration PUBLIC cxx_std_17)
+target_include_directories(dlio_registration PUBLIC ${DLIO_ROOT}/include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+target_link_libraries(dlio_registration PUBLIC ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
+add_executable(odom src/odom.cpp ${DLIO_ROOT}/src/dlio/odom.cc)
 target_compile_features(odom PRIVATE cxx_std_17)
 target_include_directories(
   odom PRIVATE ${DLIO_ROOT}/include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
 target_link_libraries(
-  odom ${PCL_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX)
+  odom dlio_registration ${PCL_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX)
 ament_target_dependencies(
   odom
   geometry_msgs
@@ -47,6 +53,13 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../config DESTINATION share/${P
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  enable_testing()
+  add_executable(dlio_motion_test test/motion_test.cpp)
+  target_compile_features(dlio_motion_test PRIVATE cxx_std_17)
+  target_include_directories(dlio_motion_test PRIVATE ${DLIO_ROOT}/include ${EIGEN3_INCLUDE_DIRS})
+  add_test(NAME dlio_motion_test COMMAND dlio_motion_test)
+  add_executable(dlio_registration_benchmark test/registration_benchmark.cpp)
+  target_link_libraries(dlio_registration_benchmark dlio_registration)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files

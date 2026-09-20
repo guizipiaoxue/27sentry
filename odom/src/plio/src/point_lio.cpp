@@ -1,5 +1,6 @@
 // ROS 2 wrapper around Point-LIO's point-by-point iterated Kalman filter.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -31,6 +32,8 @@
 #include <unistd.h>
 
 #include "plio/point_lio_estimator.hpp"
+#include "plio/imu_prediction.hpp"
+#include "plio/imu_conditioning.hpp"
 
 namespace plio {
 namespace {
@@ -81,11 +84,13 @@ class PointLioNode final : public rclcpp::Node {
         *this, "publish.state_rate_hz", 100.0);
     maximum_extrapolation_seconds_ = parameter<double>(
         *this, "publish.max_extrapolation_seconds", 0.05);
+    maximum_correction_age_ = parameter<double>(
+        *this, "publish.max_correction_age_seconds", 0.5);
     if (!(state_publish_rate_hz_ > 0.0) ||
-        maximum_extrapolation_seconds_ < 0.0) {
+        !(maximum_extrapolation_seconds_ > 0.0) ||
+        !(maximum_correction_age_ > 0.0)) {
       throw std::runtime_error(
-          "publish.state_rate_hz must be positive and "
-          "publish.max_extrapolation_seconds must be non-negative");
+          "state rate, maximum IMU gap and correction age must be positive");
     }
     terminal_enabled_ = parameter<bool>(*this, "terminal.enabled", true);
     terminal_clear_screen_ =
@@ -141,12 +146,26 @@ class PointLioNode final : public rclcpp::Node {
     parameters.lidar_to_imu_rotation = matrixParameter(
         *this, "mapping.extrinsic_R", Eigen::Matrix3d::Identity());
     estimator_ = std::make_unique<PointLioEstimator>(parameters);
+    predictor_ = ImuPrediction(maximum_extrapolation_seconds_);
+    imu_conditioning_.rotation = matrixParameter(*this, "imu.correction_rotation", Eigen::Matrix3d::Identity());
+    imu_conditioning_.lever_arm = vectorParameter(*this, "imu.effective_lever_arm", Eigen::Vector3d::Zero());
+    imu_conditioning_.smoothing_seconds = parameter<double>(*this, "imu.lever_smoothing_seconds", 0.02);
+    if (!imu_conditioning_.rotation.allFinite() ||
+        (imu_conditioning_.rotation.transpose() * imu_conditioning_.rotation - Eigen::Matrix3d::Identity()).norm() > 1e-5 ||
+        std::abs(imu_conditioning_.rotation.determinant() - 1.0) > 1e-5 ||
+        !imu_conditioning_.lever_arm.allFinite() ||
+        !std::isfinite(imu_conditioning_.smoothing_seconds) || imu_conditioning_.smoothing_seconds < 0.0) {
+      throw std::runtime_error("invalid IMU correction rotation / lever arm / smoothing");
+    }
 
     const auto sensor_qos = rclcpp::SensorDataQoS();
     const auto output_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+    imu_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions imu_options;
+    imu_options.callback_group = imu_callback_group_;
     imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
-        "imu", sensor_qos,
-        std::bind(&PointLioNode::imuCallback, this, std::placeholders::_1));
+        "imu", rclcpp::SensorDataQoS().keep_last(1000),
+        std::bind(&PointLioNode::imuCallback, this, std::placeholders::_1), imu_options);
     cloud_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         "pointcloud", sensor_qos,
         std::bind(&PointLioNode::cloudCallback, this, std::placeholders::_1));
@@ -160,6 +179,8 @@ class PointLioNode final : public rclcpp::Node {
     state_timer_ = create_wall_timer(
         std::chrono::duration<double>(1.0 / state_publish_rate_hz_),
         std::bind(&PointLioNode::publishState, this), state_callback_group_);
+    processing_timer_ = create_wall_timer(std::chrono::milliseconds(2),
+        std::bind(&PointLioNode::processPending, this));
     path_.header.frame_id = world_frame_;
     parameter_callback_ = add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &updated) {
@@ -172,6 +193,7 @@ class PointLioNode final : public rclcpp::Node {
                           })) {
             std::lock_guard<std::mutex> lock(mutex_);
             std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+            std::lock_guard<std::mutex> input_lock(input_mutex_);
             std::lock_guard<std::mutex> terminal_lock(terminal_mutex_);
             estimator_->reset();
             imu_initialization_logged_ = false;
@@ -192,7 +214,13 @@ class PointLioNode final : public rclcpp::Node {
             last_cpu_user_ = 0;
             origin_position_.setZero();
             last_position_for_distance_.setZero();
-            latest_state_.valid = false;
+            predictor_.reset();
+            imu_conditioning_.reset();
+            imu_input_.clear();
+            last_output_stamp_ = 0.0;
+            last_input_stamp_ = -1.0;
+            output_rates_.clear();
+            queue_drops_ = 0;
             RCLCPP_INFO(get_logger(), "Point-LIO state and map reset");
           }
           return response;
@@ -236,15 +264,6 @@ class PointLioNode final : public rclcpp::Node {
     double imu_lead = 0.0;
   };
 
-  struct PublishedState {
-    bool valid = false;
-    double stamp = 0.0;
-    Eigen::Vector3d position = Eigen::Vector3d::Zero();
-    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
-    Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
-    Eigen::Vector3d angular_velocity = Eigen::Vector3d::Zero();
-  };
-
   static void recordRate(
       std::deque<double> &rates, double &last_stamp, double stamp) {
     if (last_stamp > 0.0) {
@@ -261,6 +280,12 @@ class PointLioNode final : public rclcpp::Node {
     if (values.empty()) return 0.0;
     return std::accumulate(values.begin(), values.end(), 0.0) /
            static_cast<double>(values.size());
+  }
+
+  static double rateAverage(const std::deque<double> &rates) {
+    double duration = 0.0;
+    for (double rate : rates) duration += 1.0 / rate;
+    return duration > 0.0 ? rates.size() / duration : 0.0;
   }
 
   static std::string vectorText(const Eigen::Vector3d &value, int precision) {
@@ -306,12 +331,34 @@ class PointLioNode final : public rclcpp::Node {
     sample.angular_velocity = {message->angular_velocity.x,
                                message->angular_velocity.y,
                                message->angular_velocity.z};
+    std::lock_guard<std::mutex> input_lock(input_mutex_);
+    if (!std::isfinite(sample.stamp) || !sample.acceleration.allFinite() ||
+        !sample.angular_velocity.allFinite() || sample.stamp <= last_input_stamp_) return;
+    last_input_stamp_ = sample.stamp;
+    sample = imu_conditioning_.apply(sample);
+    if (!predictor_.add(sample)) return;
+    imu_input_.push_back(sample);
+    last_imu_arrival_ = std::chrono::steady_clock::now();
+    if (imu_input_.size() > 2000) {
+      imu_input_.pop_front();
+      ++queue_drops_;
+    }
+  }
+
+  void processPending() {
     std::vector<PublishedResult> ready;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      recordRate(imu_rates_, last_imu_stamp_, sample.stamp);
-      latest_imu_stamp_ = std::max(latest_imu_stamp_, sample.stamp);
-      estimator_->addImu(sample);
+      std::deque<ImuSample> samples;
+      {
+        std::lock_guard<std::mutex> input_lock(input_mutex_);
+        samples.swap(imu_input_);
+      }
+      for (const auto &sample : samples) {
+        recordRate(imu_rates_, last_imu_stamp_, sample.stamp);
+        latest_imu_stamp_ = std::max(latest_imu_stamp_, sample.stamp);
+        estimator_->addImu(sample);
+      }
       if (!estimator_->initialized()) {
         const ImuInitializationReport report =
             estimator_->initializationReport();
@@ -348,6 +395,15 @@ class PointLioNode final : public rclcpp::Node {
   }
 
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
+    if (message->width == 0 || message->height == 0 || message->is_bigendian ||
+        message->point_step == 0 ||
+        static_cast<std::size_t>(message->row_step) <
+            static_cast<std::size_t>(message->width) * message->point_step ||
+        message->data.size() < static_cast<std::size_t>(message->row_step) * message->height) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 3000,
+          "rejecting malformed or big-endian input cloud");
+      return;
+    }
     pcl::PointCloud<pcl::PointXYZI> input;
     pcl::fromROSMsg(*message, input);
 
@@ -370,7 +426,7 @@ class PointLioNode final : public rclcpp::Node {
     }
 
     // fusion_ws publishes seconds in `time`; Point-LIO stores milliseconds in
-    // PointXYZINormal::curvature. Missing timing falls back to zero offset.
+    // PointXYZINormal::curvature. Untimed MID360 scans cannot be deskewed.
     const auto field = std::find_if(
         message->fields.begin(), message->fields.end(),
         [](const sensor_msgs::msg::PointField &candidate) { return candidate.name == "time"; });
@@ -391,7 +447,7 @@ class PointLioNode final : public rclcpp::Node {
             column * message->point_step + field->offset;
         float seconds = 0.0F;
         std::memcpy(&seconds, data + offset, sizeof(seconds));
-        if (std::isfinite(seconds)) {
+        if (std::isfinite(seconds) && seconds >= -0.005F && seconds <= 0.25F) {
           cloud->points[i].curvature = seconds * 1000.0F;
         } else {
           invalid_point_time = true;
@@ -400,11 +456,20 @@ class PointLioNode final : public rclcpp::Node {
       if (invalid_point_time) {
         RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 3000,
-            "input cloud contains non-finite point times; replacing them with zero");
+            "rejecting cloud: invalid point time (expected seconds, span about 0.1 s)");
+        return;
       }
     } else {
-      RCLCPP_WARN_ONCE(get_logger(),
-                       "input cloud has no float32 time field; point timing is disabled");
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 3000,
+                       "rejecting cloud: float32 time in seconds is required");
+      return;
+    }
+    const auto time_bounds = std::minmax_element(cloud->begin(), cloud->end(),
+        [](const Point &a, const Point &b) { return a.curvature < b.curvature; });
+    if (cloud->empty() || time_bounds.second->curvature - time_bounds.first->curvature < 0.01F) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 3000,
+          "rejecting untimed cloud: time span is zero; rebuild fusion_ws without centroid voxel filtering");
+      return;
     }
 
     std::vector<PublishedResult> ready;
@@ -416,6 +481,7 @@ class PointLioNode final : public rclcpp::Node {
       pending_clouds_.push_back({cloud, message->header.stamp});
       if (pending_clouds_.size() > maximum_pending_clouds_) {
         pending_clouds_.pop_front();
+        ++queue_drops_;
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                              "dropping oldest cloud while waiting for fused IMU");
       }
@@ -438,6 +504,10 @@ class PointLioNode final : public rclcpp::Node {
     std::vector<PublishedResult> ready;
     while (!pending_clouds_.empty()) {
       const auto &pending = pending_clouds_.front();
+      const double end = stampSeconds(pending.stamp) + 0.001 *
+          std::max_element(pending.cloud->begin(), pending.cloud->end(),
+              [](const Point &a, const Point &b) { return a.curvature < b.curvature; })->curvature;
+      if (latest_imu_stamp_ < end) break;
       const auto begin = std::chrono::steady_clock::now();
       Result result = estimator_->process(
           pending.cloud, stampSeconds(pending.stamp));
@@ -453,8 +523,8 @@ class PointLioNode final : public rclcpp::Node {
         const double imu_lead = latest_imu_stamp_ - result.scan_end;
         ready.push_back({
             std::move(result), pending.stamp, computation_seconds,
-            average_computation, maximum_computation, average(imu_rates_),
-            average(lidar_rates_), imu_lead});
+            average_computation, maximum_computation, rateAverage(imu_rates_),
+            rateAverage(lidar_rates_), imu_lead});
       }
       pending_clouds_.pop_front();
     }
@@ -463,22 +533,26 @@ class PointLioNode final : public rclcpp::Node {
 
   void publishState() {
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
-    if (!latest_state_.valid) return;
-
-    const rclcpp::Time output_time = now();
-    const double requested_dt = output_time.seconds() - latest_state_.stamp;
-    const double dt = std::clamp(
-        requested_dt, 0.0, maximum_extrapolation_seconds_);
-    const Eigen::Vector3d position =
-        latest_state_.position + latest_state_.velocity * dt;
-    Eigen::Quaterniond orientation = latest_state_.orientation;
-    const double angular_speed = latest_state_.angular_velocity.norm();
-    if (angular_speed > 1.0e-9 && dt > 0.0) {
-      orientation = orientation * Eigen::Quaterniond(Eigen::AngleAxisd(
-          angular_speed * dt,
-          latest_state_.angular_velocity / angular_speed));
-      orientation.normalize();
+    ImuPrediction::State state;
+    {
+      std::lock_guard<std::mutex> input_lock(input_mutex_);
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() -
+          last_imu_arrival_).count() > maximum_extrapolation_seconds_) {
+        output_rate_hz_ = 0.0;
+        prediction_active_ = false;
+        return;
+      }
+      state = predictor_.state(maximum_correction_age_);
     }
+    prediction_active_ = state.valid;
+    if (!state.valid) output_rate_hz_ = 0.0;
+    if (!state.valid || state.stamp <= last_output_stamp_) return;
+    recordRate(output_rates_, last_output_stamp_, state.stamp);
+    output_rate_hz_ = rateAverage(output_rates_);
+    const rclcpp::Time output_time(static_cast<int64_t>(std::llround(state.stamp * 1.0e9)));
+    const Eigen::Vector3d &position = state.position;
+    const Eigen::Quaterniond &orientation = state.orientation;
+    const Eigen::Vector3d body_velocity = orientation.conjugate() * state.velocity;
 
     nav_msgs::msg::Odometry odometry;
     odometry.header.stamp = output_time;
@@ -491,12 +565,12 @@ class PointLioNode final : public rclcpp::Node {
     odometry.pose.pose.orientation.y = orientation.y();
     odometry.pose.pose.orientation.z = orientation.z();
     odometry.pose.pose.orientation.w = orientation.w();
-    odometry.twist.twist.linear.x = latest_state_.velocity.x();
-    odometry.twist.twist.linear.y = latest_state_.velocity.y();
-    odometry.twist.twist.linear.z = latest_state_.velocity.z();
-    odometry.twist.twist.angular.x = latest_state_.angular_velocity.x();
-    odometry.twist.twist.angular.y = latest_state_.angular_velocity.y();
-    odometry.twist.twist.angular.z = latest_state_.angular_velocity.z();
+    odometry.twist.twist.linear.x = body_velocity.x();
+    odometry.twist.twist.linear.y = body_velocity.y();
+    odometry.twist.twist.linear.z = body_velocity.z();
+    odometry.twist.twist.angular.x = state.angular_velocity.x();
+    odometry.twist.twist.angular.y = state.angular_velocity.y();
+    odometry.twist.twist.angular.z = state.angular_velocity.z();
     odometry_publisher_->publish(odometry);
 
     if (publish_tf_) {
@@ -512,15 +586,18 @@ class PointLioNode final : public rclcpp::Node {
   }
 
   void publishScan(const PublishedResult &published) {
-    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
     const Result &result = published.result;
-    const builtin_interfaces::msg::Time &stamp = published.stamp;
-    latest_state_.valid = true;
-    latest_state_.stamp = result.scan_end;
-    latest_state_.position = result.position;
-    latest_state_.orientation = result.orientation;
-    latest_state_.velocity = result.velocity;
-    latest_state_.angular_velocity = result.angular_velocity;
+    const builtin_interfaces::msg::Time stamp = rclcpp::Time(
+        static_cast<int64_t>(std::llround(result.scan_end * 1.0e9)));
+    {
+      std::lock_guard<std::mutex> input_lock(input_mutex_);
+      predictor_.correct(result);
+    }
+    if (std::abs(result.scan_end - now().seconds()) > 1.0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "sensor minus ROS clock %.3f s; odom/TF/cloud/path all use sensor time",
+        result.scan_end - now().seconds());
+    }
 
     sensor_msgs::msg::PointCloud2 registered;
     pcl::toROSMsg(*result.registered, registered);
@@ -619,6 +696,8 @@ class PointLioNode final : public rclcpp::Node {
           "gravity magnitude");
     check(result.gyro_bias.norm() > 0.2, "gyro bias");
     check(result.accel_bias.norm() > 1.0, "accel bias");
+    check(queue_drops_.load() > 0, "input queue overflow");
+    check(published_scans_ > 5 && !prediction_active_.load(), "IMU prediction stalled");
     check(scan_duration < 1.0e-4 || scan_duration > 0.2,
           "point timestamps");
     check(published.imu_lead < -1.0e-3 || published.imu_lead > 0.1,
@@ -655,9 +734,15 @@ class PointLioNode final : public rclcpp::Node {
               numberText(result.stamp - first_result_stamp_, 2) + " seconds");
     printLine("Sensor Rates: Livox @ " + numberText(published.lidar_rate, 2) +
               " Hz, IMU @ " + numberText(published.imu_rate, 2) + " Hz");
+    printLine("Odom/TF new states  :: " + numberText(output_rate_hz_.load(), 1) +
+              " Hz; queue drops " + std::to_string(queue_drops_.load()));
+    printLine("Input / tracked    :: " + std::to_string(result.input_points) +
+              " / " + std::to_string(result.filtered_points));
     std::cout << "|===================================================================|\n";
-    printLine("Health             :: " + health +
-              (reason.empty() ? "" : " - " + reason));
+    printLine("Health             :: " + health);
+    for (std::size_t offset = 0; offset < reason.size(); offset += 56) {
+      printLine("Reason :: " + reason.substr(offset, 56));
+    }
     printLine("Position     {W}   :: " + vectorText(result.position, 4));
     printLine("Orientation {W} wxyz :: " +
               quaternionText(result.orientation, 4));
@@ -702,6 +787,17 @@ class PointLioNode final : public rclcpp::Node {
 
   std::mutex mutex_;
   std::mutex publish_mutex_;
+  std::mutex input_mutex_;
+  ImuPrediction predictor_;
+  ImuConditioning imu_conditioning_;
+  double last_input_stamp_ = -1.0;
+  std::deque<ImuSample> imu_input_;
+  std::chrono::steady_clock::time_point last_imu_arrival_;
+  std::deque<double> output_rates_;
+  double last_output_stamp_ = 0.0;
+  std::atomic<double> output_rate_hz_{0.0};
+  std::atomic<bool> prediction_active_{false};
+  std::atomic<std::size_t> queue_drops_{0};
   std::unique_ptr<PointLioEstimator> estimator_;
   std::string world_frame_;
   std::string body_frame_;
@@ -709,6 +805,7 @@ class PointLioNode final : public rclcpp::Node {
   bool publish_path_ = true;
   double state_publish_rate_hz_ = 100.0;
   double maximum_extrapolation_seconds_ = 0.05;
+  double maximum_correction_age_ = 0.5;
   bool terminal_enabled_ = true;
   bool terminal_clear_screen_ = true;
   bool imu_initialization_logged_ = false;
@@ -732,7 +829,6 @@ class PointLioNode final : public rclcpp::Node {
   clock_t last_cpu_user_ = 0;
   Eigen::Vector3d origin_position_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d last_position_for_distance_ = Eigen::Vector3d::Zero();
-  PublishedState latest_state_;
   std::mutex terminal_mutex_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_subscription_;
@@ -742,7 +838,9 @@ class PointLioNode final : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_publisher_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::CallbackGroup::SharedPtr state_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr imu_callback_group_;
   rclcpp::TimerBase::SharedPtr state_timer_;
+  rclcpp::TimerBase::SharedPtr processing_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
       parameter_callback_;
 };

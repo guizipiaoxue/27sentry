@@ -6,8 +6,9 @@
 #include <deque>
 #include <limits>
 #include <utility>
-
-#include <pcl/filters/voxel_grid.h>
+#include <map>
+#include <tuple>
+#include <stdexcept>
 
 #include "plio/point_lio_core.hpp"
 
@@ -227,6 +228,10 @@ double pointOffset(const Point &point) {
 class PointLioEstimator::Impl {
  public:
   explicit Impl(Parameters parameters) : parameters_(std::move(parameters)) {
+    if (!(parameters_.surface_leaf_size > 0.0) ||
+        parameters_.maximum_tracking_points < 2) {
+      throw std::invalid_argument("positive voxel size and at least two tracking points required");
+    }
     reset();
   }
 
@@ -263,9 +268,6 @@ class PointLioEstimator::Impl {
       options.nearby_type_ = core::IVox::NearbyType::NEARBY18;
     }
     map_ = std::make_unique<core::IVox>(options);
-    voxel_.setLeafSize(
-        parameters_.surface_leaf_size, parameters_.surface_leaf_size,
-        parameters_.surface_leaf_size);
     noise_ = core::processNoise(
         parameters_.velocity_covariance, parameters_.gyro_covariance,
         parameters_.accel_covariance,
@@ -278,8 +280,7 @@ class PointLioEstimator::Impl {
       return;
     }
     if (!imu_.empty() && sample.stamp <= imu_.back().stamp) {
-      imu_.clear();
-      last_prediction_time_ = -1.0;
+      return;
     }
     imu_.push_back(sample);
     if (!initialized_) {
@@ -314,15 +315,35 @@ class PointLioEstimator::Impl {
       const Point &point = input->points[i];
       const double range_squared =
           point.x * point.x + point.y * point.y + point.z * point.z;
-      if (std::isfinite(point.x) && std::isfinite(point.y) &&
+      if (std::isfinite(point.curvature) && std::isfinite(point.x) && std::isfinite(point.y) &&
           std::isfinite(point.z) && range_squared >= minimum_range_squared &&
           range_squared <= maximum_range_squared) {
         valid->push_back(point);
       }
     }
+    // Keep an actual measurement (including acquisition time), never a
+    // centroid of returns acquired at different poses during a scan.
     Cloud::Ptr filtered(new Cloud);
-    voxel_.setInputCloud(valid);
-    voxel_.filter(*filtered);
+    std::map<std::tuple<int, int, int>, std::pair<std::size_t, double>> cells;
+    const double leaf = parameters_.surface_leaf_size;
+    for (const auto &point : valid->points) {
+      if (!std::isfinite(point.curvature)) continue;
+      const int x = static_cast<int>(std::floor(point.x / leaf));
+      const int y = static_cast<int>(std::floor(point.y / leaf));
+      const int z = static_cast<int>(std::floor(point.z / leaf));
+      const double d = std::pow(point.x / leaf - x - 0.5, 2) +
+          std::pow(point.y / leaf - y - 0.5, 2) +
+          std::pow(point.z / leaf - z - 0.5, 2);
+      const auto key = std::make_tuple(x, y, z);
+      const auto it = cells.find(key);
+      if (it == cells.end()) {
+        cells.emplace(key, std::make_pair(filtered->size(), d));
+        filtered->push_back(point);
+      } else if (d < it->second.second) {
+        filtered->points[it->second.first] = point;
+        it->second.second = d;
+      }
+    }
     if (filtered->empty()) {
       return result;
     }
@@ -350,8 +371,10 @@ class PointLioEstimator::Impl {
     }
 
     result.filtered_points = filtered->size();
-    result.scan_start = stamp + pointOffset(filtered->points.front());
-    result.scan_end = stamp + pointOffset(filtered->points.back());
+    const auto bounds = std::minmax_element(valid->begin(), valid->end(),
+        [](const Point &a, const Point &b) { return a.curvature < b.curvature; });
+    result.scan_start = stamp + pointOffset(*bounds.first);
+    result.scan_end = stamp + pointOffset(*bounds.second);
     const double scan_end = result.scan_end;
     if (imu_.empty() || imu_.back().stamp < scan_end) {
       result.waiting_for_imu = true;
@@ -360,6 +383,12 @@ class PointLioEstimator::Impl {
     if (scan_end <= last_prediction_time_) {
       return result;
     }
+
+    filtered->erase(filtered->begin(), std::lower_bound(
+        filtered->begin(), filtered->end(), last_prediction_time_,
+        [stamp](const Point &p, double t) { return stamp + pointOffset(p) < t; }));
+    result.filtered_points = filtered->size();
+    if (filtered->empty()) return result;
 
     Cloud world;
     world.resize(filtered->size());
@@ -406,6 +435,7 @@ class PointLioEstimator::Impl {
       begin = end;
     }
 
+    propagateTo(scan_end);
     world.width = static_cast<std::uint32_t>(world.size());
     world.height = 1;
     world.is_dense = true;
@@ -429,6 +459,13 @@ class PointLioEstimator::Impl {
     result.map_voxels = map_->NumValidGrids();
     *result.registered = world;
     *result.body = *filtered;
+    for (std::size_t i = 0; i < world.size(); ++i) {
+      const Eigen::Vector3d local = filter_.x_.rot.transpose() *
+          (Eigen::Vector3d(world[i].x, world[i].y, world[i].z) - filter_.x_.pos);
+      result.body->points[i].x = local.x();
+      result.body->points[i].y = local.y();
+      result.body->points[i].z = local.z();
+    }
     return result;
   }
 
@@ -555,7 +592,6 @@ class PointLioEstimator::Impl {
   Parameters parameters_;
   core::Filter filter_;
   Eigen::Matrix<double, 30, 30> noise_;
-  pcl::VoxelGrid<Point> voxel_;
   std::unique_ptr<core::IVox> map_;
   std::deque<ImuSample> imu_;
   std::deque<ImuSample> imu_for_initialization_;

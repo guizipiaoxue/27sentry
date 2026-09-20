@@ -1,6 +1,6 @@
 // DLIO entry point for the cloud and IMU already fused in the gimbal frame.
-// The fused PointXYZI cloud has no per-point timestamps, so deskewing is
-// intentionally disabled. No startup IMU calibration is performed.
+// Fusion preserves float32 point time in seconds. DLIO deskews before voxel
+// sampling and estimates its initial gravity attitude from the fused IMU.
 
 #include "dlio/odom.h"
 
@@ -28,8 +28,8 @@ int main(int argc, char **argv) {
       "-r", "kf_cloud:=/dlio/odom_node/pointcloud/keyframe",
       "-r", "keyframe:=/dlio/odom_node/keyframe",
       "-r", "deskewed:=/fusion_pcl",
-      "-p", "imu/calibration:=false",
-      "-p", "pointcloud/deskew:=false",
+      "-p", "imu/calibration:=true",
+      "-p", "pointcloud/deskew:=true",
       "-p", "odom/computeTimeOffset:=false",
       "-p", "publish/pose_odom:=true",
       "-p", "publish/keyframes:=true",

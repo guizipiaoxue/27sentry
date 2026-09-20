@@ -9,7 +9,7 @@ namespace {
 
 constexpr double kGravity = 9.80665;
 
-plio::Cloud::Ptr makePlane() {
+plio::Cloud::Ptr makePlane(bool duplicate_returns = false) {
   plio::Cloud::Ptr cloud(new plio::Cloud);
   for (int x = -10; x <= 10; ++x) {
     for (int y = -10; y <= 10; ++y) {
@@ -20,6 +20,13 @@ plio::Cloud::Ptr makePlane() {
       point.intensity = 1.0F;
       point.curvature = static_cast<float>(x + 10) / 20.0F * 90.0F;
       cloud->push_back(point);
+      // A second return in the same voxel, at a different acquisition time.
+      // A centroid would create a coordinate/time pair absent from the input.
+      if (duplicate_returns) {
+        point.x += 0.003F;
+        point.curvature += 1.0F;
+        cloud->push_back(point);
+      }
     }
   }
   cloud->width = static_cast<std::uint32_t>(cloud->size());
@@ -132,6 +139,33 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  const auto source = makePlane(true);
+  plio::Parameters voxel_parameters;
+  voxel_parameters.point_filter = 1;
+  voxel_parameters.surface_leaf_size = 0.05;
+  plio::PointLioEstimator voxel_estimator(voxel_parameters);
+  for (int i = 0; i <= 150; ++i) {
+    plio::ImuSample sample;
+    sample.stamp = i * 0.005;
+    sample.acceleration = Eigen::Vector3d(0, 0, kGravity);
+    voxel_estimator.addImu(sample);
+  }
+  const auto voxel_result = voxel_estimator.process(source, 0.5);
+  if (!voxel_result.initialized || voxel_result.body->empty() ||
+      std::abs(voxel_result.scan_end - 0.591) > 1e-6) return EXIT_FAILURE;
+  for (const auto &point : voxel_result.body->points) {
+    bool found = false;
+    for (const auto &raw : source->points) {
+      if (std::abs(point.x - raw.x) < 1e-5 &&
+          std::abs(point.y - raw.y) < 1e-5 &&
+          std::abs(point.z - raw.z) < 1e-5 &&
+          point.curvature == raw.curvature) { found = true; break; }
+    }
+    if (!found) {
+      std::cerr << "voxel filtering changed measurement coordinates/time\n";
+      return EXIT_FAILURE;
+    }
+  }
   std::cout << "static IMU test passed: position="
             << result.position.transpose() << " velocity="
             << result.velocity.transpose() << '\n';

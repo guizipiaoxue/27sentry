@@ -18,7 +18,7 @@ Options:
   -h, --help                 Show this help message
 
 Environment defaults: ODOM_ALGORITHM=dlio|plio, RECORD_ROSBAG=0|1,
-ROSBAG_OUTPUT=/path/to/bag, FUSION_CLOUD_VOXEL_LEAF_SIZE=0.08.
+ROSBAG_OUTPUT=/path/to/bag.
 EOF
 }
 
@@ -158,7 +158,6 @@ LIVOX_BROADCAST_CODE="${LIVOX_BROADCAST_CODE:-}"
 DRIVER_STARTUP_WAIT="${DRIVER_STARTUP_WAIT:-2}"
 FUSION_STARTUP_WAIT="${FUSION_STARTUP_WAIT:-1}"
 IMU_CALIBRATION_TIMEOUT="${IMU_CALIBRATION_TIMEOUT:-30}"
-FUSION_CLOUD_VOXEL_LEAF_SIZE="${FUSION_CLOUD_VOXEL_LEAF_SIZE:-0.08}"
 RAW_LIDAR5_TOPIC="/sentry/raw/lidar5"
 RAW_LIDAR3_TOPIC="/sentry/raw/lidar3"
 RAW_IMU5_TOPIC="/sentry/raw/imu5"
@@ -380,7 +379,8 @@ fi
 echo "[start_odom] Starting point-cloud and IMU fusion..."
 setsid ros2 run fusion_ws fusion_pcl --ros-args \
   -p imu_accel_unit:=auto \
-  -p "cloud_voxel_leaf_size:=${FUSION_CLOUD_VOXEL_LEAF_SIZE}" \
+  -p "lidar5_calibration:=${ROOT_DIR}/slam/config/gimbal_lidar_5.yaml" \
+  -p "lidar3_calibration:=${ROOT_DIR}/slam/config/gimbal_lidar_3.yaml" \
   -p "lidar5_topic:=${RAW_LIDAR5_TOPIC}" \
   -p "lidar3_topic:=${RAW_LIDAR3_TOPIC}" \
   -p "imu5_topic:=${RAW_IMU5_TOPIC}" \
@@ -445,8 +445,8 @@ if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
     -r kf_cloud:=/dlio/odom_node/pointcloud/keyframe \
     -r deskewed:=/fusion_pcl \
     -r keyframe:=/dlio/odom_node/keyframe \
-    -p imu/calibration:=false \
-    -p pointcloud/deskew:=false \
+    -p imu/calibration:=true \
+    -p pointcloud/deskew:=true \
     -p odom/computeTimeOffset:=false \
     -p publish/pose_odom:=true \
     -p publish/keyframes:=true \

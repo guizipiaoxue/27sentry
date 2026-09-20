@@ -5,3 +5,4 @@ log
 maps/
 *.pcd
 rosbag/
+analysis/

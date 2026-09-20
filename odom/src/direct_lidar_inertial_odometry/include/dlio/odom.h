@@ -11,6 +11,8 @@
  ***********************************************************/
 
 #include "dlio/dlio.h"
+#include "dlio/motion.h"
+#include <deque>
 
 // ROS
 #include "rclcpp/rclcpp.hpp"
@@ -51,7 +53,7 @@ public:
 private:
 
   struct State;
-  struct ImuMeas;
+  using ImuMeas = dlio::MotionImu;
 
   void getParams();
 
@@ -82,11 +84,6 @@ private:
   std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>>
     integrateImu(double start_time, Eigen::Quaternionf q_init, Eigen::Vector3f p_init, Eigen::Vector3f v_init,
                  const std::vector<double>& sorted_timestamps);
-  std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f>>
-    integrateImuInternal(Eigen::Quaternionf q_init, Eigen::Vector3f p_init, Eigen::Vector3f v_init,
-                         const std::vector<double>& sorted_timestamps,
-                         boost::circular_buffer<ImuMeas>::reverse_iterator begin_imu_it,
-                         boost::circular_buffer<ImuMeas>::reverse_iterator end_imu_it);
   void propagateGICP();
 
   void propagateState();
@@ -114,6 +111,20 @@ private:
   rclcpp::TimerBase::SharedPtr publish_timer;
   bool publish_pose_odom_;
   bool publish_keyframes_;
+  double publish_rate_hz_ = 100.0;
+  int maximum_tracking_points_ = 4000;
+  int path_capacity_ = 10000;
+  bool terminal_enabled_ = true;
+  double last_publish_stamp_ = 0.0;
+  std::deque<double> published_stamps_;
+  std::atomic<double> output_rate_hz_{0.0};
+  std::chrono::steady_clock::time_point last_imu_arrival_;
+  dlio::ImuConditioner imu_conditioner_;
+  double lever_smoothing_seconds_ = 0.02;
+  Eigen::Matrix3f fused_imu_rotation_ = Eigen::Matrix3f::Identity();
+  Eigen::Vector3f fused_imu_lever_ = Eigen::Vector3f::Zero();
+  bool scan_valid_ = false;
+  std::atomic<bool> stopping_{false};
 
   // Subscribers
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
@@ -189,7 +200,7 @@ private:
 
   // Keyframes
   pcl::PointCloud<PointType>::ConstPtr keyframe_cloud;
-  int num_processed_keyframes;
+  std::atomic<int> num_processed_keyframes{0};
 
   pcl::ConvexHull<PointType> convex_hull;
   pcl::ConcaveHull<PointType> concave_hull;
@@ -207,7 +218,7 @@ private:
   bool new_submap_is_ready;
   std::future<void> submap_future;
   std::condition_variable submap_build_cv;
-  bool main_loop_running;
+  bool main_loop_running = false;
   std::mutex main_loop_running_mutex;
 
   // Timestamps
@@ -249,14 +260,10 @@ private:
   double prev_imu_stamp;
   double imu_dp, imu_dq_deg;
 
-  struct ImuMeas {
-    double stamp;
-    double dt; // defined as the difference between the current and the previous measurement
-    Eigen::Vector3f ang_vel;
-    Eigen::Vector3f lin_accel;
-  }; ImuMeas imu_meas;
+  ImuMeas imu_meas;
 
   boost::circular_buffer<ImuMeas> imu_buffer;
+  boost::circular_buffer<ImuMeas> integration_buffer;
   std::mutex mtx_imu;
   std::condition_variable cv_imu_stamp;
 
@@ -266,7 +273,7 @@ private:
 
   // Geometric Observer
   struct Geo {
-    bool first_opt_done;
+    std::atomic<bool> first_opt_done{false};
     std::mutex mtx;
     double dp;
     double dq_deg;
@@ -297,6 +304,16 @@ private:
     Velocity v;
     ImuBias b; // imu biases in body frame
   }; State state;
+  struct TimedState { double stamp; State value; };
+  std::deque<TimedState> state_history_;
+  std::deque<ImuMeas> observer_imu_;
+  double state_stamp_ = 0.0;
+  double correction_stamp_ = 0.0;
+  int calibration_samples_ = 0;
+  Eigen::Vector3f calibration_gyro_sum_ = Eigen::Vector3f::Zero();
+  Eigen::Vector3f calibration_accel_sum_ = Eigen::Vector3f::Zero();
+  Eigen::Vector3f calibration_gyro_squared_ = Eigen::Vector3f::Zero();
+  Eigen::Vector3f calibration_accel_squared_ = Eigen::Vector3f::Zero();
 
   struct Pose {
     Eigen::Vector3f p; // position in world frame

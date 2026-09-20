@@ -6,8 +6,9 @@
     publish.path: true
     publish.path_capacity: 10000
     publish.state_rate_hz: 100.0
-    # Bound constant-velocity/angular-velocity prediction between lidar updates.
+    # Bound IMU gaps/wall-clock staleness; outputs use the sensor timestamp.
     publish.max_extrapolation_seconds: 0.05
+    publish.max_correction_age_seconds: 0.5
     terminal.enabled: true
     terminal.clear_screen: true
 
@@ -44,6 +45,13 @@
     imu.initialization_max_gyro_stddev: 0.02
     imu.initialization_max_accel_stddev: 0.30
     imu.initialization_max_gravity_error: 0.75
+    # Fixed-yaw cloud/IMU calibration, 20260919_205858. Specific force m/s^2.
+    # These values belong to this dual-lidar mounting, not a generic MID360.
+    imu.correction_rotation: [0.9999949702999255, -0.00000209278433299, -0.00317165106395461,
+                              -0.00000209278433299, 0.9999991292231744, -0.00131967742767436,
+                              0.00317165106395461, 0.00131967742767436, 0.9999940995230998]
+    imu.effective_lever_arm: [0.010757780068684941, 0.020580770543404278, 0.0]
+    imu.lever_smoothing_seconds: 0.02
     # MID360 near-field returns often contain the sensor/gimbal itself.
     preprocess.blind: 0.50
     preprocess.point_filter_num: 2

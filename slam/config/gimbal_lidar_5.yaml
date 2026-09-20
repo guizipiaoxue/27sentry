@@ -1,16 +1,11 @@
-calibration_method: yaw_axis_preserve_static_cloud_heading
-source_bag: 20260919_194252_yaw_cali
-source_bag_integrity: truncated_tail_recovered_read_only
-recovered_pose_duration_seconds: 115.180670
-samples: 3174
-yaw_axis_lidar: [-0.000428395, -0.501815321, 0.864974682]
-axis_dominance: 0.998961904
-axis_mapping_error_deg: 0.000000000
-relative_yaw_adjustment_deg: 0.000000000
-static_cloud_point_plane_rms: 0.074099549
-static_cloud_point_plane_median: 0.033826090
+calibration_method: raw_cloud_fixed_yaw_pivot_train_first30s
+source_bag: 20260919_205858_plio
+constraint: fixed_yaw_pivot_z_zero_heading_preserved
+training_pose_count: 51
+holdout_pivot_residual_p95_m: 0.04569927484
+# Yaw-only cannot identify Z or common heading.
 lidar_to_gimbal_rotation:
-  - [0.999999908, -0.000213591, 0.000371354]
-  - [-0.000001600, 0.864974762, 0.501815366]
-  - [-0.000428395, -0.501815321, 0.864974682]
-lidar_to_gimbal_translation: [0.000548862, 0.110668451, 0.000000000]
+  - [0.9999999997371725, 0.000004382893258414434, -0.000005593669225540407]
+  - [-0.0000010036992114515512, 0.8663916140878846, 0.4993651684823903]
+  - [0.000007035056558003577, -0.499365168916881, 0.8663916137831511]
+lidar_to_gimbal_translation: [-0.009082304878100893, 0.15528930488726106, 0.0]

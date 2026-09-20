@@ -9,15 +9,24 @@
     frames/imu: fusion_imu
     publish/pose_odom: true
     publish/keyframes: true
-    pointcloud/deskew: false
+    publish/state_rate_hz: 100.0
+    publish/path_capacity: 10000
+    terminal/enabled: true
+    pointcloud/deskew: true
     pointcloud/voxelize: true
-    imu/calibration: false
+    imu/calibration: true
+    # This mounting's virtual fused IMU correction; g/rad/s conversion is upstream.
+    imu/fused_correction_R: [0.9999949702999255, -0.00000209278433299, -0.00317165106395461,
+                             -0.00000209278433299, 0.9999991292231744, -0.00131967742767436,
+                             0.00317165106395461, 0.00131967742767436, 0.9999940995230998]
+    imu/fused_lever_arm: [0.010757780068684941, 0.020580770543404278, 0.0]
+    imu/lever_smoothing_seconds: 0.02
     imu/intrinsics/accel/bias: [0.0, 0.0, 0.0]
     imu/intrinsics/accel/sm: [1.0, 0.0, 0.0,
                                0.0, 1.0, 0.0,
                                0.0, 0.0, 1.0]
     imu/intrinsics/gyro/bias: [0.0, 0.0, 0.0]
-    extrinsics/baselink2imu/t: [0.006253, -0.011775, 0.007645]
+    extrinsics/baselink2imu/t: [0.0, 0.0, 0.0]
     extrinsics/baselink2imu/R: [1.0, 0.0, 0.0,
                                 0.0, 1.0, 0.0,
                                 0.0, 0.0, 1.0]
@@ -30,12 +39,15 @@
     odom/imu/approximateGravity: true
     odom/imu/calibration/gyro: true
     odom/imu/calibration/accel: true
-    odom/imu/calibration/time: 3.0
+    # Additional static gravity alignment after upstream dual-IMU calibration.
+    odom/imu/calibration/time: 0.5
     odom/imu/bufferSize: 5000
     odom/keyframe/threshD: 1.0
     odom/keyframe/threshR: 45.0
     # Sparse scan used only for GICP odometry; mapping publishes a dense copy.
     odom/preprocessing/voxelFilter/res: 0.25
+    odom/preprocessing/maxPoints: 4000
+    odom/threads: 4
     odom/preprocessing/cropBoxFilter/size: 1.0
     odom/submap/keyframe/knn: 10
     odom/submap/keyframe/kcv: 10

@@ -229,6 +229,13 @@ private:
   std::vector<double> comp_times;
   std::vector<double> imu_rates;
   std::vector<double> lidar_rates;
+  std::size_t scans_received_ = 0;
+  std::size_t scans_published_ = 0;
+  std::size_t scans_initializing_ = 0;
+  std::size_t scans_preprocess_rejected_ = 0;
+  std::size_t scans_sparse_rejected_ = 0;
+  std::size_t scans_registration_rejected_ = 0;
+  std::chrono::steady_clock::time_point last_terminal_update_{};
 
   double first_scan_stamp;
   double elapsed_time;

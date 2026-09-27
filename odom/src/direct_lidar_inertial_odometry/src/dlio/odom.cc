@@ -843,12 +843,31 @@ void dlio::OdomNode::initializeDLIO() {
 
 void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr pc) {
 
+  const auto callback_begin = std::chrono::steady_clock::now();
+  ++scans_received_;
   std::unique_lock<decltype(this->main_loop_running_mutex)> lock(main_loop_running_mutex);
   this->main_loop_running = true;
   lock.unlock();
-  const auto release_loop = [this](void *) {
-    { std::lock_guard<std::mutex> guard(main_loop_running_mutex); main_loop_running = false; }
+  const auto release_loop = [this, callback_begin](void *) {
+    {
+      std::lock_guard<std::mutex> guard(main_loop_running_mutex);
+      main_loop_running = false;
+    }
     submap_build_cv.notify_all();
+
+    const double callback_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - callback_begin).count();
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "DLIO scans received=%zu published=%zu init=%zu preprocess_rejected=%zu "
+        "sparse_rejected=%zu registration_rejected=%zu callback_ms=%.2f",
+        scans_received_,
+        scans_published_,
+        scans_initializing_,
+        scans_preprocess_rejected_,
+        scans_sparse_rejected_,
+        scans_registration_rejected_,
+        callback_ms);
   };
   std::unique_ptr<void, decltype(release_loop)> running_guard(this, release_loop);
 
@@ -862,7 +881,10 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   if (!this->dlio_initialized) {
     this->initializeDLIO();
   }
-  if (!this->dlio_initialized) return;
+  if (!this->dlio_initialized) {
+    ++scans_initializing_;
+    return;
+  }
 
   // Convert incoming scan into DLIO format
   this->getScanFromROS(pc);
@@ -871,10 +893,12 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->preprocessPoints();
 
   if (!this->first_valid_scan || !this->scan_valid_) {
+    ++scans_preprocess_rejected_;
     return;
   }
 
   if (this->current_scan->points.size() <= this->gicp_min_num_points_) {
+    ++scans_sparse_rejected_;
     RCLCPP_FATAL(this->get_logger(), "Low number of points in the cloud!");
     return;
   }
@@ -892,6 +916,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
   // Set initial frame as first keyframe
   if (this->keyframes.size() == 0) {
+    ++scans_initializing_;
     this->initializeInputTarget();
     { std::lock_guard<std::mutex> guard(main_loop_running_mutex); this->main_loop_running = false; }
     this->updateState();
@@ -904,7 +929,10 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
   // Get the next pose via IMU + S2M + GEO
   this->getNextPose();
-  if (!scan_valid_) return;
+  if (!scan_valid_) {
+    ++scans_registration_rejected_;
+    return;
+  }
 
   // Update current keyframe poses and map
   this->updateKeyframes();
@@ -940,6 +968,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
     published_cloud = this->deskewed_scan;
   }
   this->publishToROS(published_cloud, this->T_corr);
+  ++scans_published_;
 
   // Update some statistics
   this->comp_times.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - then).count());
@@ -947,7 +976,14 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->gicp_hasConverged = this->gicp.hasConverged();
 
   // Debug statements and publish custom DLIO message
-  if (terminal_enabled_) this->debug();
+  // Terminal writes can block (especially over SSH); avoid flushing a full
+  // dashboard on every scan. Callback diagnostics above include this cost.
+  const auto terminal_now = std::chrono::steady_clock::now();
+  if (terminal_enabled_ &&
+      terminal_now - last_terminal_update_ >= std::chrono::seconds(1)) {
+    this->debug();
+    last_terminal_update_ = terminal_now;
+  }
 
 }
 
@@ -1992,7 +2028,9 @@ void dlio::OdomNode::debug() {
     << std::setw(6) << (*std::max_element(this->cpu_percents.begin(), this->cpu_percents.end()) / 100.)
                        * this->numProcessors
     << "     |" << std::endl;
-  std::cout << "| CPU Load         :: "
+  std::cout << "| CPU (100%=1 core):: "
+            << cpu_percent * this->numProcessors << " %" << std::endl;
+  std::cout << "| CPU (host total) :: "
     << std::setfill(' ') << std::setw(6) << cpu_percent << " %     // Avg: "
     << std::setw(6) << avg_cpu_usage << " / Max: "
     << std::setw(6) << *std::max_element(this->cpu_percents.begin(), this->cpu_percents.end())

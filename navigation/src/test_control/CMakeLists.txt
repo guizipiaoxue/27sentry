@@ -11,6 +11,10 @@ find_package(ament_cmake REQUIRED)
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
+add_executable(keyboard_control src/keyboard_control.cpp)
+target_compile_features(keyboard_control PRIVATE cxx_std_17)
+install(TARGETS keyboard_control DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

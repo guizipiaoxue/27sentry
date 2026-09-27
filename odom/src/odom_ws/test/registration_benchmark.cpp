@@ -63,6 +63,11 @@ int main(int argc, char **argv) {
     for(std::size_t i=0;i<points->size();++i)if(i==0||(*points)[i].time!=(*points)[i-1].time){times.push_back(stamp+(*points)[i].time);indices.push_back(i);}
     indices.push_back(points->size());
     const double scan_time=times[times.size()/2];
+    // Bags may contain lidar scans before the IMU calibration window ends.
+    // Do not construct a reversed IMU iterator range for those scans.
+    if (times.front() < previous) {
+      continue;
+    }
     auto a=std::upper_bound(imu.begin(),imu.end(),previous,[](double t,const auto&s){return t<s.stamp;});
     if(a==imu.begin())continue;
     --a;

@@ -6,3 +6,4 @@ maps/
 *.pcd
 rosbag/
 analysis/
+doc/

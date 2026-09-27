@@ -46,7 +46,7 @@
     odom/keyframe/threshR: 45.0
     # Sparse scan used only for GICP odometry; mapping publishes a dense copy.
     odom/preprocessing/voxelFilter/res: 0.25
-    odom/preprocessing/maxPoints: 4000
+    odom/preprocessing/maxPoints: 1500
     odom/threads: 4
     odom/preprocessing/cropBoxFilter/size: 1.0
     odom/submap/keyframe/knn: 10

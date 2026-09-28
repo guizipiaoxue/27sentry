@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -34,6 +36,21 @@ namespace
 
 using Point = pcl::PointXYZI;
 using Cloud = pcl::PointCloud<Point>;
+
+// Measures graph updates independently from Point-LIO's estimator timing.
+class ScopedTiming {
+ public:
+  explicit ScopedTiming(std::function<void(double)> callback)
+      : callback_(std::move(callback)), start_(std::chrono::steady_clock::now()) {}
+  ~ScopedTiming() {
+    callback_(std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start_).count());
+  }
+
+ private:
+  std::function<void(double)> callback_;
+  std::chrono::steady_clock::time_point start_;
+};
 
 gtsam::Key poseKey(int id)
 {
@@ -200,6 +217,18 @@ private:
   void keyframeCallback(
     const loop_closure::msg::Keyframe::SharedPtr message)
   {
+    ScopedTiming timing([this](double seconds) {
+      keyframe_timing_sum_seconds_ += seconds;
+      keyframe_timing_max_seconds_ =
+        std::max(keyframe_timing_max_seconds_, seconds);
+      if (++keyframe_timing_count_ % 20 == 0) {
+        RCLCPP_INFO(
+          get_logger(),
+          "keyframe graph update: avg %.2f ms, max %.2f ms over %zu frames",
+          keyframe_timing_sum_seconds_ / keyframe_timing_count_ * 1.0e3,
+          keyframe_timing_max_seconds_ * 1.0e3, keyframe_timing_count_);
+      }
+    });
     std::lock_guard<std::mutex> lock(mutex_);
     if (keyframes_.count(message->id) != 0U) {
       return;
@@ -257,6 +286,17 @@ private:
   void loopCallback(
     const loop_closure::msg::LoopConstraint::SharedPtr message)
   {
+    ScopedTiming timing([this](double seconds) {
+      loop_timing_sum_seconds_ += seconds;
+      loop_timing_max_seconds_ = std::max(loop_timing_max_seconds_, seconds);
+      if (++loop_timing_count_ % 5 == 0) {
+        RCLCPP_INFO(
+          get_logger(),
+          "loop graph update: avg %.2f ms, max %.2f ms over %zu loops",
+          loop_timing_sum_seconds_ / loop_timing_count_ * 1.0e3,
+          loop_timing_max_seconds_ * 1.0e3, loop_timing_count_);
+      }
+    });
     std::lock_guard<std::mutex> lock(mutex_);
     if (!hasKeyframe(message->matched_index) ||
       !hasKeyframe(message->current_index))
@@ -420,6 +460,12 @@ private:
   int relinearize_skip_;
   int optimization_iterations_;
   std::size_t accepted_loop_count_ = 0;
+  std::size_t keyframe_timing_count_ = 0;
+  std::size_t loop_timing_count_ = 0;
+  double keyframe_timing_sum_seconds_ = 0.0;
+  double keyframe_timing_max_seconds_ = 0.0;
+  double loop_timing_sum_seconds_ = 0.0;
+  double loop_timing_max_seconds_ = 0.0;
 
   std::mutex mutex_;
   std::map<int, KeyframeData> keyframes_;

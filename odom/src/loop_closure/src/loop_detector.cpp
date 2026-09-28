@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -21,6 +23,21 @@ namespace {
 
 using Point = pcl::PointXYZI;
 using Cloud = pcl::PointCloud<Point>;
+
+// Reports callback wall time without adding another executor timer.
+class ScopedTiming {
+ public:
+  explicit ScopedTiming(std::function<void(double)> callback)
+      : callback_(std::move(callback)), start_(std::chrono::steady_clock::now()) {}
+  ~ScopedTiming() {
+    callback_(std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start_).count());
+  }
+
+ private:
+  std::function<void(double)> callback_;
+  std::chrono::steady_clock::time_point start_;
+};
 
 Eigen::Isometry3f poseToIsometry(const geometry_msgs::msg::Pose &pose) {
   Eigen::Quaternionf rotation(
@@ -156,6 +173,16 @@ class LoopDetector final : public rclcpp::Node {
 
   void keyframeCallback(
       const loop_closure::msg::Keyframe::SharedPtr message) {
+    ScopedTiming timing([this](double seconds) {
+      timing_sum_seconds_ += seconds;
+      timing_max_seconds_ = std::max(timing_max_seconds_, seconds);
+      if (++timing_count_ % 20 == 0) {
+        RCLCPP_INFO(get_logger(),
+                    "keyframe callback: avg %.2f ms, max %.2f ms over %zu frames",
+                    timing_sum_seconds_ / timing_count_ * 1.0e3,
+                    timing_max_seconds_ * 1.0e3, timing_count_);
+      }
+    });
     if (!frames_.empty() && message->id <= frames_.back().id) {
       RCLCPP_WARN(get_logger(), "ignoring non-increasing keyframe id %d",
                   message->id);
@@ -269,6 +296,9 @@ class LoopDetector final : public rclcpp::Node {
   double min_travel_distance_;
   double icp_max_correspondence_;
   double max_fitness_;
+  std::size_t timing_count_ = 0;
+  double timing_sum_seconds_ = 0.0;
+  double timing_max_seconds_ = 0.0;
   std::vector<Frame> frames_;
   rclcpp::Subscription<loop_closure::msg::Keyframe>::SharedPtr keyframe_sub_;
   rclcpp::Publisher<loop_closure::msg::LoopConstraint>::SharedPtr loop_pub_;

@@ -36,6 +36,31 @@ published after 1 m of translation or 45 degrees of rotation by default;
 tracking (at most `mapping.max_tracking_points` points), so the optimized PCD
 contains those sampled points rather than the dense DLIO keyframe scans.
 
+## Timing and CPU impact
+
+Point-LIO's terminal dashboard reports the estimator wall time for one cloud,
+its rolling average and maximum, IMU/LiDAR rates, CPU load, and input queue
+drops. This is the value to compare with and without GTSAM. The loop detector
+prints its keyframe callback average/maximum every 20 keyframes. The graph
+backend prints separate keyframe-update and accepted-loop-update timings.
+
+For a controlled comparison, run the same rosbag or route twice:
+
+```bash
+ENABLE_GTSAM=0 bash start_odom.sh -a plio --no-record-bag
+ENABLE_GTSAM=1 bash start_odom.sh -a plio --no-record-bag
+pidstat -urd -p "$(pgrep -f 'point_lio|loop_detector|pose_graph_backend' | paste -sd, -)" 1
+ros2 topic hz /point_lio/keyframe
+ros2 topic hz /loop_closure/constraint
+ros2 topic bw /point_lio/keyframe
+```
+
+The loop nodes run in separate processes, so GICP and GTSAM do not block the
+Point-LIO executor directly. They still consume CPU, memory, and DDS bandwidth;
+contention shows up as increased Point-LIO computation time, lower LiDAR rate,
+or queue drops. Keyframe clouds and the graph are retained in memory, so the
+long-run memory trend should also be monitored with `pidstat -r` or `top`.
+
 From the repository root, `bash build_plio.sh --start` rebuilds the fusion and
 PLIO packages in Release mode, runs the focused regression tests, and starts
 `start_odom.sh -a plio` with its SDK discovery and rosbag recording. Without

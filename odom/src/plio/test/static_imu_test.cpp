@@ -92,6 +92,31 @@ int main() {
     }
   }
 
+  {
+    plio::Parameters parameters;
+    parameters.point_filter = 1;
+    parameters.initialization_scans = 5;
+    plio::PointLioEstimator estimator(parameters);
+    for (int i = 0; i <= 400; ++i) {
+      plio::ImuSample sample;
+      sample.stamp = i * 0.005;
+      sample.acceleration = Eigen::Vector3d(0.0, 0.0, kGravity);
+      estimator.addImu(sample);
+    }
+    const auto plane = makePlane();
+    for (int i = 0; i < 5; ++i) {
+      const auto scan = estimator.process(plane, 0.5 + i * 0.1);
+      if (scan.initialized != (i == 4) || scan.matched_points != 0) {
+        std::cerr << "registration started before map warmup completed\n";
+        return EXIT_FAILURE;
+      }
+    }
+    if (estimator.process(plane, 1.0).matched_points == 0) {
+      std::cerr << "registration did not start after map warmup\n";
+      return EXIT_FAILURE;
+    }
+  }
+
   plio::ImuInitializationReport report;
   plio::Result result = runStaticScenario(
       Eigen::Vector3d(0.0, 0.0, kGravity), report);
@@ -142,6 +167,7 @@ int main() {
   const auto source = makePlane(true);
   plio::Parameters voxel_parameters;
   voxel_parameters.point_filter = 1;
+  voxel_parameters.initialization_scans = 1;
   voxel_parameters.surface_leaf_size = 0.05;
   plio::PointLioEstimator voxel_estimator(voxel_parameters);
   for (int i = 0; i <= 150; ++i) {

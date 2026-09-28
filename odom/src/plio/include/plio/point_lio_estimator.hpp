@@ -42,8 +42,10 @@ struct Parameters {
   double initialization_max_accel_stddev = 0.30;
   double initialization_max_gravity_error = 0.75;
   std::size_t initialization_points = 100;
+  std::size_t initialization_scans = 5;
   std::size_t point_filter = 2;
   std::size_t maximum_tracking_points = 1200;
+  std::size_t max_points_per_voxel = 64;
   double point_time_bin_seconds = 0.001;
   int nearby_type = 18;
   bool estimate_extrinsics = false;

@@ -229,8 +229,10 @@ class PointLioEstimator::Impl {
  public:
   explicit Impl(Parameters parameters) : parameters_(std::move(parameters)) {
     if (!(parameters_.surface_leaf_size > 0.0) ||
-        parameters_.maximum_tracking_points < 2) {
-      throw std::invalid_argument("positive voxel size and at least two tracking points required");
+        parameters_.maximum_tracking_points < 2 ||
+        parameters_.max_points_per_voxel == 0 ||
+        parameters_.initialization_scans == 0) {
+      throw std::invalid_argument("invalid voxel, tracking, or initialization limits");
     }
     reset();
   }
@@ -240,6 +242,7 @@ class PointLioEstimator::Impl {
     imu_for_initialization_.clear();
     initialized_ = false;
     map_initialized_ = false;
+    initialization_scan_count_ = 0;
     initialization_report_ = {};
     last_prediction_time_ = -1.0;
     filter_ = core::Filter();
@@ -258,6 +261,7 @@ class PointLioEstimator::Impl {
 
     core::IVox::Options options;
     options.resolution_ = static_cast<float>(parameters_.map_resolution);
+    options.max_points_per_voxel_ = parameters_.max_points_per_voxel;
     if (parameters_.nearby_type == 0) {
       options.nearby_type_ = core::IVox::NearbyType::CENTER;
     } else if (parameters_.nearby_type == 6) {
@@ -439,10 +443,10 @@ class PointLioEstimator::Impl {
     world.width = static_cast<std::uint32_t>(world.size());
     world.height = 1;
     world.is_dense = true;
-    if (!map_initialized_) {
-      map_initialized_ = world.size() >= parameters_.initialization_points;
-    }
-    if (map_initialized_) {
+    if (!map_initialized_ && world.size() >= parameters_.initialization_points) {
+      map_->AddPoints(world.points);
+      map_initialized_ = ++initialization_scan_count_ >= parameters_.initialization_scans;
+    } else if (map_initialized_) {
       map_->AddPoints(world.points);
     }
     discardImuBefore(scan_end);
@@ -597,6 +601,7 @@ class PointLioEstimator::Impl {
   std::deque<ImuSample> imu_for_initialization_;
   bool initialized_ = false;
   bool map_initialized_ = false;
+  std::size_t initialization_scan_count_ = 0;
   ImuInitializationReport initialization_report_;
   double last_prediction_time_ = -1.0;
 };

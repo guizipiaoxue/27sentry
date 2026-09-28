@@ -36,6 +36,13 @@ published after 1 m of translation or 45 degrees of rotation by default;
 tracking (at most `mapping.max_tracking_points` points), so the optimized PCD
 contains those sampled points rather than the dense DLIO keyframe scans.
 
+The iVox map keeps at most `mapping.ivox_max_points_per_voxel` recent returns
+per 30 cm cell (64 by default). Without that limit, repeated scans of a static
+scene make every nearest-neighbor query progressively slower. At startup,
+`mapping.initialization_scans` (5 by default) builds a denser initial map
+before the first point-to-plane correction; this reduces random centimeter
+offsets from matching a new scan against only one sparse Livox scan.
+
 ## Timing and CPU impact
 
 Point-LIO's terminal dashboard reports the estimator wall time for one cloud,

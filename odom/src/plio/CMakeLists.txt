@@ -48,6 +48,13 @@ if(BUILD_TESTING)
   target_link_libraries(static_imu_test ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
   add_test(NAME static_imu_test COMMAND static_imu_test)
 
+  add_executable(ivox_capacity_test test/ivox_capacity_test.cpp)
+  target_compile_features(ivox_capacity_test PRIVATE cxx_std_17)
+  target_include_directories(
+    ivox_capacity_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  target_link_libraries(ivox_capacity_test ${PCL_LIBRARIES})
+  add_test(NAME ivox_capacity_test COMMAND ivox_capacity_test)
+
   add_executable(imu_prediction_test test/imu_prediction_test.cpp)
   target_compile_features(imu_prediction_test PRIVATE cxx_std_17)
   target_include_directories(imu_prediction_test PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})

@@ -133,12 +133,16 @@ class PointLioNode final : public rclcpp::Node {
         *this, "imu.initialization_max_gravity_error", 0.75);
     parameters.initialization_points = static_cast<std::size_t>(std::max<std::int64_t>(
         10, parameter<std::int64_t>(*this, "mapping.initialization_points", 100)));
+    parameters.initialization_scans = static_cast<std::size_t>(std::max<std::int64_t>(
+        1, parameter<std::int64_t>(*this, "mapping.initialization_scans", 5)));
     parameters.point_filter = static_cast<std::size_t>(std::max<std::int64_t>(
         1, parameter<std::int64_t>(*this, "preprocess.point_filter_num", 2)));
     parameters.maximum_tracking_points = static_cast<std::size_t>(
         std::max<std::int64_t>(
             2, parameter<std::int64_t>(
                    *this, "mapping.max_tracking_points", 1200)));
+    parameters.max_points_per_voxel = static_cast<std::size_t>(std::max<std::int64_t>(
+        1, parameter<std::int64_t>(*this, "mapping.ivox_max_points_per_voxel", 64)));
     parameters.point_time_bin_seconds = 1.0e-3 * parameter<double>(
         *this, "mapping.point_time_bin_ms", 1.0);
     if (parameters.point_time_bin_seconds < 0.0) {

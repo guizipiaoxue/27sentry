@@ -38,6 +38,10 @@
     mapping.ivox_grid_resolution: 0.30
     mapping.ivox_nearby_type: 18
     mapping.initialization_points: 100
+    # Build several scans before trusting point-to-plane registration.
+    mapping.initialization_scans: 5
+    # Bound both iVox memory and nearest-neighbor work in revisited cells.
+    mapping.ivox_max_points_per_voxel: 64
     # Hard upper bound after voxel filtering, before point-wise matching.
     mapping.max_tracking_points: 1200
     # Batch points acquired within 1 ms into one filter update. Set 0 to disable.

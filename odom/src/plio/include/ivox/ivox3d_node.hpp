@@ -46,7 +46,7 @@ class IVoxNode {
     IVoxNode() = default;
     IVoxNode(const PointT& center, const float& side_length) {}  /// same with phc
 
-    void InsertPoint(const PointT& pt);
+    void InsertPoint(const PointT& pt, std::size_t max_points);
 
     inline bool Empty() const;
 
@@ -59,6 +59,7 @@ class IVoxNode {
 
    private:
     std::vector<PointT> points_;
+    std::size_t next_replacement_ = 0;
 };
 
 template <typename PointT, int dim = 3>
@@ -118,8 +119,14 @@ struct IVoxNode<PointT, dim>::DistPoint {
 };
 
 template <typename PointT, int dim>
-void IVoxNode<PointT, dim>::InsertPoint(const PointT& pt) {
-    points_.template emplace_back(pt);
+void IVoxNode<PointT, dim>::InsertPoint(const PointT& pt, std::size_t max_points) {
+    if (points_.size() < max_points) {
+        points_.template emplace_back(pt);
+    } else if (max_points != 0) {
+        // Refresh old samples while keeping nearest-neighbor work bounded.
+        points_[next_replacement_] = pt;
+        next_replacement_ = (next_replacement_ + 1) % max_points;
+    }
 }
 
 template <typename PointT, int dim>

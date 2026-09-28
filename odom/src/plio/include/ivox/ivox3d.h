@@ -55,6 +55,7 @@ class IVox {
         float inv_resolution_ = 10.0;                   // inverse resolution
         NearbyType nearby_type_ = NearbyType::NEARBY6;  // nearby range
         std::size_t capacity_ = 1000000;                // capacity
+        std::size_t max_points_per_voxel_ = 64;
     };
 
     /**
@@ -268,14 +269,22 @@ void IVox<dim, node_type, PointType>::AddPoints(const PointVector& points_to_add
             grids_cache_.push_front({key, NodeType(center, options_.resolution_)});
             grids_map_.insert({key, grids_cache_.begin()});
 
-            grids_cache_.front().second.InsertPoint(points_to_add[i]);
+            if constexpr (node_type == IVoxNodeType::DEFAULT) {
+                grids_cache_.front().second.InsertPoint(points_to_add[i], options_.max_points_per_voxel_);
+            } else {
+                grids_cache_.front().second.InsertPoint(points_to_add[i]);
+            }
 
             if (grids_map_.size() >= options_.capacity_) {
                 grids_map_.erase(grids_cache_.back().first);
                 grids_cache_.pop_back();
             }
         } else {
-            iter->second->second.InsertPoint(points_to_add[i]);
+            if constexpr (node_type == IVoxNodeType::DEFAULT) {
+                iter->second->second.InsertPoint(points_to_add[i], options_.max_points_per_voxel_);
+            } else {
+                iter->second->second.InsertPoint(points_to_add[i]);
+            }
             grids_cache_.splice(grids_cache_.begin(), grids_cache_, iter->second);
             grids_map_[key] = grids_cache_.begin();
         }

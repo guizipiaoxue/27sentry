@@ -13,6 +13,9 @@ esac
 set +u
 source /opt/ros/humble/setup.bash
 source "${ROOT_DIR}/livox/install/setup.bash"
+if [[ -f "${ROOT_DIR}/odom/install/setup.bash" ]]; then
+  source "${ROOT_DIR}/odom/install/setup.bash"
+fi
 set -u
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 (
@@ -22,7 +25,13 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 )
 (
   cd "${ROOT_DIR}/odom"
-  colcon build --packages-select plio --parallel-workers 1 \
+  # A clean workspace needs the loop_closure message and backend first.
+  if [[ -f install/loop_closure/share/loop_closure/cmake/loop_closureConfig.cmake ]]; then
+    selection=(--packages-select plio)
+  else
+    selection=(--packages-up-to plio)
+  fi
+  colcon build "${selection[@]}" --parallel-workers 1 \
     --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
   ctest --test-dir build/plio \
     -R '^(static_imu|imu_prediction|lidar_covariance)_test$' --output-on-failure

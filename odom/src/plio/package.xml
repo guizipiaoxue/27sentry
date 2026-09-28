@@ -11,6 +11,7 @@
 
   <depend>eigen3_cmake_module</depend>
   <depend>geometry_msgs</depend>
+  <depend>loop_closure</depend>
   <depend>nav_msgs</depend>
   <depend>pcl_conversions</depend>
   <depend>rclcpp</depend>

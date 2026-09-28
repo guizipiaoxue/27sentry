@@ -1,0 +1,6 @@
+std_msgs/Header header
+float32 yaw_rate_degps
+float32 pitch_rate_degps
+float32 yaw_accel_degps2
+float32 pitch_accel_degps2
+uint32 sample_tick_ms

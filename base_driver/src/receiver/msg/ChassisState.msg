@@ -1,0 +1,7 @@
+std_msgs/Header header
+uint16 uwb_yaw_deg
+int16 damage_difference
+float32 steer_angle_deg
+float32 velocity_x_mps
+float32 velocity_y_mps
+float32 yaw_rate_radps

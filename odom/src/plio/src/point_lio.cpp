@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <loop_closure/msg/keyframe.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <pcl_conversions/pcl_conversions.h>
@@ -80,6 +81,11 @@ class PointLioNode final : public rclcpp::Node {
     body_frame_ = parameter<std::string>(*this, "frames.body", "gimbal");
     publish_tf_ = parameter<bool>(*this, "publish.tf", true);
     publish_path_ = parameter<bool>(*this, "publish.path", true);
+    publish_keyframes_ = parameter<bool>(*this, "publish.keyframes", true);
+    keyframe_distance_m_ = parameter<double>(
+        *this, "keyframe.distance_m", 1.0);
+    keyframe_rotation_deg_ = parameter<double>(
+        *this, "keyframe.rotation_deg", 45.0);
     state_publish_rate_hz_ = parameter<double>(
         *this, "publish.state_rate_hz", 100.0);
     maximum_extrapolation_seconds_ = parameter<double>(
@@ -88,9 +94,11 @@ class PointLioNode final : public rclcpp::Node {
         *this, "publish.max_correction_age_seconds", 0.5);
     if (!(state_publish_rate_hz_ > 0.0) ||
         !(maximum_extrapolation_seconds_ > 0.0) ||
-        !(maximum_correction_age_ > 0.0)) {
+        !(maximum_correction_age_ > 0.0) ||
+        !(keyframe_distance_m_ > 0.0) ||
+        !(keyframe_rotation_deg_ > 0.0)) {
       throw std::runtime_error(
-          "state rate, maximum IMU gap and correction age must be positive");
+          "state rate, IMU timeouts and keyframe thresholds must be positive");
     }
     terminal_enabled_ = parameter<bool>(*this, "terminal.enabled", true);
     terminal_clear_screen_ =
@@ -173,6 +181,8 @@ class PointLioNode final : public rclcpp::Node {
     path_publisher_ = create_publisher<nav_msgs::msg::Path>("path", output_qos);
     registered_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>("registered", output_qos);
     body_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>("registered_body", output_qos);
+    keyframe_publisher_ = create_publisher<loop_closure::msg::Keyframe>(
+        "keyframe", rclcpp::QoS(20).reliable());
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     state_callback_group_ = create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -199,6 +209,7 @@ class PointLioNode final : public rclcpp::Node {
             imu_initialization_logged_ = false;
             pending_clouds_.clear();
             path_.poses.clear();
+            has_keyframe_pose_ = false;
             imu_rates_.clear();
             lidar_rates_.clear();
             computation_times_.clear();
@@ -610,23 +621,59 @@ class PointLioNode final : public rclcpp::Node {
     body.header.frame_id = body_frame_;
     body_publisher_->publish(body);
 
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header.stamp = stamp;
-    pose.header.frame_id = world_frame_;
-    pose.pose.position.x = result.position.x();
-    pose.pose.position.y = result.position.y();
-    pose.pose.position.z = result.position.z();
-    pose.pose.orientation.x = result.orientation.x();
-    pose.pose.orientation.y = result.orientation.y();
-    pose.pose.orientation.z = result.orientation.z();
-    pose.pose.orientation.w = result.orientation.w();
-    if (publish_path_) {
-      path_.header.stamp = stamp;
-      path_.poses.push_back(pose);
-      if (path_.poses.size() > path_capacity_) path_.poses.erase(path_.poses.begin());
-      path_publisher_->publish(path_);
+    {
+      std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.stamp = stamp;
+      pose.header.frame_id = world_frame_;
+      pose.pose.position.x = result.position.x();
+      pose.pose.position.y = result.position.y();
+      pose.pose.position.z = result.position.z();
+      pose.pose.orientation.x = result.orientation.x();
+      pose.pose.orientation.y = result.orientation.y();
+      pose.pose.orientation.z = result.orientation.z();
+      pose.pose.orientation.w = result.orientation.w();
+      if (publish_path_) {
+        path_.header.stamp = stamp;
+        path_.poses.push_back(pose);
+        if (path_.poses.size() > path_capacity_) path_.poses.erase(path_.poses.begin());
+        path_publisher_->publish(path_);
+      }
+      publishKeyframe(result, pose.pose, stamp);
     }
     if (terminal_enabled_) printDashboard(published);
+  }
+
+  // Match DLIO's keyframe contract: pose and cloud are both in odom coordinates.
+  void publishKeyframe(const Result &result, const geometry_msgs::msg::Pose &pose,
+                       const builtin_interfaces::msg::Time &stamp) {
+    if (!publish_keyframes_ || result.registered->empty()) return;
+    const Eigen::Quaterniond orientation = result.orientation.normalized();
+    if (has_keyframe_pose_ &&
+        (result.position - last_keyframe_position_).norm() < keyframe_distance_m_ &&
+        orientation.angularDistance(last_keyframe_orientation_) * 180.0 / M_PI <
+            keyframe_rotation_deg_) return;
+
+    pcl::PointCloud<pcl::PointXYZI> cloud;
+    cloud.reserve(result.registered->size());
+    for (const auto &source : result.registered->points) {
+      pcl::PointXYZI point;
+      point.x = source.x;
+      point.y = source.y;
+      point.z = source.z;
+      point.intensity = source.intensity;
+      cloud.push_back(point);
+    }
+    loop_closure::msg::Keyframe keyframe;
+    keyframe.id = next_keyframe_id_++;
+    keyframe.pose = pose;
+    pcl::toROSMsg(cloud, keyframe.cloud);
+    keyframe.cloud.header.stamp = stamp;
+    keyframe.cloud.header.frame_id = world_frame_;
+    keyframe_publisher_->publish(keyframe);
+    last_keyframe_position_ = result.position;
+    last_keyframe_orientation_ = orientation;
+    has_keyframe_pose_ = true;
   }
 
   static double residentMemoryMb() {
@@ -803,6 +850,13 @@ class PointLioNode final : public rclcpp::Node {
   std::string body_frame_;
   bool publish_tf_ = true;
   bool publish_path_ = true;
+  bool publish_keyframes_ = true;
+  bool has_keyframe_pose_ = false;
+  int next_keyframe_id_ = 0;
+  double keyframe_distance_m_ = 1.0;
+  double keyframe_rotation_deg_ = 45.0;
+  Eigen::Vector3d last_keyframe_position_ = Eigen::Vector3d::Zero();
+  Eigen::Quaterniond last_keyframe_orientation_ = Eigen::Quaterniond::Identity();
   double state_publish_rate_hz_ = 100.0;
   double maximum_extrapolation_seconds_ = 0.05;
   double maximum_correction_age_ = 0.5;
@@ -836,6 +890,7 @@ class PointLioNode final : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_publisher_;
+  rclcpp::Publisher<loop_closure::msg::Keyframe>::SharedPtr keyframe_publisher_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::CallbackGroup::SharedPtr state_callback_group_;
   rclcpp::CallbackGroup::SharedPtr imu_callback_group_;

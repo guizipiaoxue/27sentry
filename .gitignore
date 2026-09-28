@@ -7,3 +7,5 @@ maps/
 rosbag/
 analysis/
 doc/
+old/
+__pycache__/

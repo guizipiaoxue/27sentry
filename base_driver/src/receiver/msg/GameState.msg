@@ -1,0 +1,9 @@
+std_msgs/Header header
+bool game_started
+bool red_team
+uint8 enemy_outpost_hp
+uint8 self_outpost_hp
+uint16 bullet_remaining_17mm
+float32 stage_remaining_sec
+uint16 self_hp
+uint32 event_data

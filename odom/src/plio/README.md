@@ -20,9 +20,21 @@ The launch file starts both `fusion_ws/fusion_pcl` and Point-LIO. The Livox
 driver must already be publishing its per-device custom-message and IMU topics
 (the repository's existing driver command uses `xfer_format:=1`).
 
-The executable publishes `/point_lio/odom`, `/path`, `/cloud_registered`, and
-the `odom -> gimbal` transform. Keep both lidars stationary while `fusion_ws`
-performs its startup IMU calibration.
+The executable publishes `/point_lio/odom`, `/path`, `/cloud_registered`,
+`/point_lio/keyframe`, and the `odom -> gimbal` transform. Keep both lidars
+stationary while `fusion_ws` performs its startup IMU calibration. The default
+launch also starts the shared Scan Context/GICP loop detector and GTSAM iSAM2
+backend, which publish `/loop_closure/constraint`, `/mapping/optimized_path`,
+and `map -> odom`. Use `ENABLE_GTSAM=0 bash start_odom.sh -a plio` to run only
+the continuous odometry pipeline.
+
+Keyframes use the same `loop_closure/Keyframe` message as DLIO: increasing ID,
+scan-end pose in `odom`, and registered cloud in `odom`. A new keyframe is
+published after 1 m of translation or 45 degrees of rotation by default;
+`publish.keyframes`, `keyframe.distance_m`, and `keyframe.rotation_deg` are in
+`config/point_lio.yaml`. Point-LIO's registered cloud is already sampled for
+tracking (at most `mapping.max_tracking_points` points), so the optimized PCD
+contains those sampled points rather than the dense DLIO keyframe scans.
 
 From the repository root, `bash build_plio.sh --start` rebuilds the fusion and
 PLIO packages in Release mode, runs the focused regression tests, and starts

@@ -181,12 +181,6 @@ if [[ "${ENABLE_GTSAM}" != "0" && "${ENABLE_GTSAM}" != "1" ]]; then
   echo "[start_odom] ENABLE_GTSAM must be 0 or 1." >&2
   exit 1
 fi
-if [[ "${ODOM_ALGORITHM}" == "plio" && "${ENABLE_GTSAM}" == "1" ]]; then
-  echo "[start_odom] Point-LIO does not publish the DLIO keyframe topics required by GTSAM." >&2
-  echo "[start_odom] GTSAM is disabled for this run." >&2
-  ENABLE_GTSAM="0"
-fi
-
 CONFIG_FILES=("${LIVOX_CONFIG}" "${ODOM_PARAMS}")
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   CONFIG_FILES+=("${LOOP_PARAMS}")
@@ -225,7 +219,7 @@ done
 # graph and can associate multiple message types with one Livox topic.
 STALE_PIPELINE_PROCESSES="$(
   pgrep -a -f \
-    'livox_ros_driver2/lib/livox_ros_driver2/livox_ros_driver2_node|fusion_ws/lib/fusion_ws/fusion_pcl|plio/lib/plio/point_lio|odom_ws/lib/odom_ws/odom' \
+    'livox_ros_driver2/lib/livox_ros_driver2/livox_ros_driver2_node|fusion_ws/lib/fusion_ws/fusion_pcl|plio/lib/plio/point_lio|odom_ws/lib/odom_ws/odom|loop_closure/lib/loop_closure/(loop_detector|pose_graph_backend)' \
     || true
 )"
 if [[ -n "${STALE_PIPELINE_PROCESSES}" ]]; then
@@ -405,17 +399,22 @@ fi
 echo "[start_odom] Both IMUs calibrated."
 
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
+  if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
+    KEYFRAME_TOPIC="/dlio/odom_node/keyframe"
+  else
+    KEYFRAME_TOPIC="/point_lio/keyframe"
+  fi
   echo "[start_odom] Starting Scan Context++ loop detector..."
   setsid ros2 run loop_closure loop_detector --ros-args \
     --params-file "${LOOP_PARAMS}" \
-    -r keyframe:=/dlio/odom_node/keyframe \
+    -r "keyframe:=${KEYFRAME_TOPIC}" \
     -r loop_constraint:=/loop_closure/constraint &
   LOOP_PID=$!
 
   echo "[start_odom] Starting GTSAM iSAM2 mapping backend..."
   setsid ros2 run loop_closure pose_graph_backend --ros-args \
     --params-file "${LOOP_PARAMS}" \
-    -r keyframe:=/dlio/odom_node/keyframe \
+    -r "keyframe:=${KEYFRAME_TOPIC}" \
     -r loop_constraint:=/loop_closure/constraint \
     -r optimized_path:=/mapping/optimized_path \
     -r save_map:=/mapping/save_map &
@@ -462,7 +461,8 @@ else
     -r odom:=/point_lio/odom \
     -r path:=/path \
     -r registered:=/cloud_registered \
-    -r registered_body:=/cloud_registered_body &
+    -r registered_body:=/cloud_registered_body \
+    -r keyframe:=/point_lio/keyframe &
 fi
 ODOM_PID=$!
 
@@ -475,7 +475,7 @@ fi
 if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
   echo "[start_odom] DLIO keyframe cloud: /dlio/odom_node/pointcloud/keyframe"
 else
-  echo "[start_odom] Point-LIO topics: /point_lio/odom, /path, /cloud_registered"
+  echo "[start_odom] Point-LIO topics: /point_lio/odom, /path, /cloud_registered, /point_lio/keyframe"
 fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   echo "[start_odom] GTSAM enabled. Optimized map is written only on save."

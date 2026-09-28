@@ -4,6 +4,9 @@
     frames.body: gimbal
     publish.tf: true
     publish.path: true
+    publish.keyframes: true
+    keyframe.distance_m: 1.0
+    keyframe.rotation_deg: 45.0
     publish.path_capacity: 10000
     publish.state_rate_hz: 100.0
     # Bound IMU gaps/wall-clock staleness; outputs use the sensor timestamp.

@@ -1,0 +1,24 @@
+mpc_control:
+  ros__parameters:
+    map_frame: map
+    robot_frame: base_link
+    command_frame: base_link
+    control_period_ms: 50
+    horizon_steps: 20
+    target_speed_mps: 1.0
+    max_speed_mps: 1.0
+    max_accel_mps2: 1.5
+    velocity_time_constant_sec: 0.15
+    goal_tolerance_m: 0.15
+    path_timeout_sec: 15.0
+    tf_timeout_sec: 0.3
+    feedback_timeout_sec: 0.3
+    velocity_filter_gain: 0.35
+    chassis_feedback_y_sign: -1.0
+    position_weight: 12.0
+    velocity_weight: 2.0
+    control_weight: 0.05
+    smoothness_weight: 1.5
+    terminal_weight: 20.0
+    solver_max_iterations: 150
+    solver_tolerance: 0.0001

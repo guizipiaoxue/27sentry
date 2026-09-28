@@ -1,0 +1,7 @@
+receiver:
+  ros__parameters:
+    device: /dev/ttyACM0
+    baud_rate: 115200
+    poll_period_ms: 5
+    reconnect_period_ms: 1000
+    frame_id: gimbal

@@ -30,6 +30,7 @@ add_executable(single_lidar_odom
   ${DLIO_ROOT}/src/nano_gicp/nano_gicp.cc
   ${DLIO_ROOT}/src/nano_gicp/nanoflann.cc)
 target_compile_features(single_lidar_odom PRIVATE cxx_std_17)
+target_include_directories(single_lidar_odom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 target_compile_options(single_lidar_odom PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(single_lidar_odom
   ${PCL_LIBRARIES}

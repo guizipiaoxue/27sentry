@@ -35,7 +35,7 @@ target_link_libraries(dlio_registration PUBLIC ${PCL_LIBRARIES} OpenMP::OpenMP_C
 add_executable(odom src/odom.cpp ${DLIO_ROOT}/src/dlio/odom.cc)
 target_compile_features(odom PRIVATE cxx_std_17)
 target_include_directories(
-  odom PRIVATE ${DLIO_ROOT}/include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  odom PRIVATE ${DLIO_ROOT}/include ../common ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
 target_link_libraries(
   odom dlio_registration ${PCL_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX)
 ament_target_dependencies(

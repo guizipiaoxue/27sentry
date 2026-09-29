@@ -47,6 +47,7 @@ include_directories(${PCL_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIR})
 
 include_directories(include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 include_directories(SYSTEM)
 
 # NanoFLANN

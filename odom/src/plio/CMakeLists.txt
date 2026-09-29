@@ -27,7 +27,7 @@ add_executable(point_lio
   src/point_lio_estimator.cpp)
 target_compile_features(point_lio PRIVATE cxx_std_17)
 target_include_directories(
-  point_lio PRIVATE include ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+  point_lio PRIVATE include ../common ${EIGEN3_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
 target_link_libraries(point_lio ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
 ament_target_dependencies(
   point_lio geometry_msgs loop_closure nav_msgs pcl_conversions rclcpp rcl_interfaces

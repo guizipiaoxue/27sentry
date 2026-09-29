@@ -12,6 +12,7 @@
 
 #include "dlio/dlio.h"
 #include "dlio/motion.h"
+#include "run_logger.hpp"
 #include <deque>
 
 // ROS
@@ -124,6 +125,7 @@ private:
   Eigen::Matrix3f fused_imu_rotation_ = Eigen::Matrix3f::Identity();
   Eigen::Vector3f fused_imu_lever_ = Eigen::Vector3f::Zero();
   bool scan_valid_ = false;
+  std::unique_ptr<odom_logging::RunLogger> run_logger_;
   std::atomic<bool> stopping_{false};
 
   // Subscribers

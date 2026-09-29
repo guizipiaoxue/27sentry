@@ -12,6 +12,7 @@
     publish/state_rate_hz: 100.0
     publish/path_capacity: 10000
     terminal/enabled: true
+    runlog/directory: runlog
     pointcloud/deskew: true
     pointcloud/voxelize: true
     imu/calibration: true

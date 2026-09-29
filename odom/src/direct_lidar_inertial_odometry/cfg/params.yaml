@@ -17,6 +17,7 @@
     frames/baselink: base_link
     frames/lidar: livox_frame
     frames/imu: imu
+    runlog/directory: runlog
 
     map/waitUntilMove: true
     map/dense/filtered: false

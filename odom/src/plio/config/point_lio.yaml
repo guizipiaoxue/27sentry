@@ -14,6 +14,13 @@
     publish.max_correction_age_seconds: 0.5
     terminal.enabled: true
     terminal.clear_screen: true
+    runlog.directory: runlog
+
+    # Keep reception independent from Point-LIO processing. The callback only
+    # validates and queues a cloud; the processing timer runs the estimator.
+    input.cloud_queue_depth: 100
+    input.pending_queue_size: 50
+    input.processing_period_ms: 1
 
     # Both streams are already transformed/calibrated into the gimbal frame by
     # fusion_ws, so the remaining virtual lidar-to-IMU extrinsic is identity.

@@ -22,6 +22,12 @@
 dlio::OdomNode::OdomNode() : Node("dlio_odom_node") {
 
   this->getParams();
+  const auto runlog_directory =
+      this->declare_parameter<std::string>("runlog/directory", "runlog");
+  run_logger_ = std::make_unique<odom_logging::RunLogger>(
+      "odomdlio", runlog_directory);
+  run_logger_->log("CONFIG", "node=dlio_odom_node");
+  RCLCPP_INFO(get_logger(), "DLIO run log: %s", run_logger_->path().c_str());
 
   this->gicp.setNumThreads(this->num_threads_);
   this->gicp_temp.setNumThreads(this->num_threads_);
@@ -401,6 +407,15 @@ void dlio::OdomNode::publishPose() {
   odometry.twist.twist.angular.y = snapshot.v.ang.b.y();
   odometry.twist.twist.angular.z = snapshot.v.ang.b.z();
   odom_pub->publish(odometry);
+  run_logger_->log(
+      "STATE_PUBLISHED",
+      "stamp=" + to_string_with_precision(stamp, 9) +
+      " position=" + to_string_with_precision(snapshot.p.x(), 6) + "," +
+      to_string_with_precision(snapshot.p.y(), 6) + "," +
+      to_string_with_precision(snapshot.p.z(), 6) +
+      " velocity=" + to_string_with_precision(snapshot.v.lin.w.x(), 6) + "," +
+      to_string_with_precision(snapshot.v.lin.w.y(), 6) + "," +
+      to_string_with_precision(snapshot.v.lin.w.z(), 6));
   geometry_msgs::msg::PoseStamped pose;
   pose.header = odometry.header;
   pose.pose = odometry.pose.pose;
@@ -845,10 +860,18 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
   const auto callback_begin = std::chrono::steady_clock::now();
   ++scans_received_;
+  const double cloud_stamp = rclcpp::Time(pc->header.stamp).seconds();
+  const std::size_t cloud_points =
+      static_cast<std::size_t>(pc->width) * pc->height;
+  run_logger_->log("CLOUD_RECEIVED",
+      "stamp=" + to_string_with_precision(cloud_stamp, 9) +
+      " points=" + std::to_string(cloud_points));
+  std::string scan_status = "unknown";
   std::unique_lock<decltype(this->main_loop_running_mutex)> lock(main_loop_running_mutex);
   this->main_loop_running = true;
   lock.unlock();
-  const auto release_loop = [this, callback_begin](void *) {
+  const auto release_loop = [this, callback_begin, cloud_stamp, cloud_points,
+                             &scan_status](void *) {
     {
       std::lock_guard<std::mutex> guard(main_loop_running_mutex);
       main_loop_running = false;
@@ -857,6 +880,14 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
     const double callback_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - callback_begin).count();
+    run_logger_->log("SCAN_FINISHED",
+        "stamp=" + to_string_with_precision(cloud_stamp, 9) +
+        " status=" + scan_status +
+        " points=" + std::to_string(cloud_points) +
+        " callback_ms=" + to_string_with_precision(callback_ms, 3) +
+        " imu_calibrated=" + std::to_string(imu_calibrated.load() ? 1 : 0) +
+        " received=" + std::to_string(scans_received_) +
+        " published=" + std::to_string(scans_published_));
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "DLIO scans received=%zu published=%zu init=%zu preprocess_rejected=%zu "
@@ -883,6 +914,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   }
   if (!this->dlio_initialized) {
     ++scans_initializing_;
+    scan_status = "waiting_for_imu_initialization";
     return;
   }
 
@@ -894,11 +926,13 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 
   if (!this->first_valid_scan || !this->scan_valid_) {
     ++scans_preprocess_rejected_;
+    scan_status = "preprocess_rejected_or_waiting_for_imu";
     return;
   }
 
   if (this->current_scan->points.size() <= this->gicp_min_num_points_) {
     ++scans_sparse_rejected_;
+    scan_status = "too_few_points";
     RCLCPP_FATAL(this->get_logger(), "Low number of points in the cloud!");
     return;
   }
@@ -917,6 +951,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   // Set initial frame as first keyframe
   if (this->keyframes.size() == 0) {
     ++scans_initializing_;
+    scan_status = "initial_map";
     this->initializeInputTarget();
     { std::lock_guard<std::mutex> guard(main_loop_running_mutex); this->main_loop_running = false; }
     this->updateState();
@@ -931,6 +966,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   this->getNextPose();
   if (!scan_valid_) {
     ++scans_registration_rejected_;
+    scan_status = "registration_failed";
     return;
   }
 
@@ -969,6 +1005,16 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
   }
   this->publishToROS(published_cloud, this->T_corr);
   ++scans_published_;
+  scan_status = "published";
+  run_logger_->log("SCAN_PUBLISHED",
+      "stamp=" + to_string_with_precision(scan_stamp, 9) +
+      " input_points=" + std::to_string(original_scan->size()) +
+      " tracked_points=" + std::to_string(current_scan->size()) +
+      " deskew=" + std::to_string(deskew_status.load() ? 1 : 0) +
+      " gicp_converged=" + std::to_string(gicp.hasConverged() ? 1 : 0) +
+      " position=" + to_string_with_precision(lidarPose.p.x(), 6) + "," +
+      to_string_with_precision(lidarPose.p.y(), 6) + "," +
+      to_string_with_precision(lidarPose.p.z(), 6));
 
   // Update some statistics
   this->comp_times.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - then).count());
@@ -990,9 +1036,13 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::msg::PointCloud2::Sha
 void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw) {
 
   this->first_imu_received = true;
+  const double raw_stamp = rclcpp::Time(imu_raw->header.stamp).seconds();
 
   sensor_msgs::msg::Imu::SharedPtr imu = this->transformImu( imu_raw );
   if (!imu) {
+    run_logger_->log("IMU_REJECTED",
+        "stamp=" + to_string_with_precision(raw_stamp, 9) +
+        " reason=conditioning_failed");
     return;
   }
   std::lock_guard<std::mutex> state_lock(geo.mtx);
@@ -1037,6 +1087,9 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
       accel_avg[2] += lin_accel[2];
       calibration_gyro_squared_ += ang_vel.cwiseProduct(ang_vel);
       calibration_accel_squared_ += lin_accel.cwiseProduct(lin_accel);
+      run_logger_->log("IMU_CALIBRATING",
+          "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+          " samples=" + std::to_string(num_samples));
 
       if(print) {
         std::cout << std::endl << " Calibrating IMU for " << this->imu_calib_time_ << " seconds... ";
@@ -1046,7 +1099,12 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
 
     } else {
 
-      if (num_samples < 50) { first_imu_stamp = imu_stamp_secs; return; }
+      if (num_samples < 50) {
+        run_logger_->log("IMU_CALIBRATION_RETRY",
+            "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+            " reason=too_few_samples samples=" + std::to_string(num_samples));
+        first_imu_stamp = imu_stamp_secs; return;
+      }
       const Eigen::Vector3f amean = accel_avg / num_samples, gmean = gyro_avg / num_samples;
       const float astd = (calibration_accel_squared_ / num_samples - amean.cwiseProduct(amean)).cwiseMax(0.f).cwiseSqrt().maxCoeff();
       const float gstd = (calibration_gyro_squared_ / num_samples - gmean.cwiseProduct(gmean)).cwiseMax(0.f).cwiseSqrt().maxCoeff();
@@ -1056,6 +1114,12 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
         num_samples = 0; gyro_avg.setZero(); accel_avg.setZero();
         calibration_gyro_squared_.setZero(); calibration_accel_squared_.setZero();
         first_imu_stamp = imu_stamp_secs;
+        run_logger_->log("IMU_CALIBRATION_RETRY",
+            "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+            " reason=not_stationary accel_norm=" +
+            to_string_with_precision(amean.norm(), 6) +
+            " accel_std=" + to_string_with_precision(astd, 6) +
+            " gyro_norm=" + to_string_with_precision(gmean.norm(), 6));
         return;
       }
       std::cout << "done" << std::endl << std::endl;
@@ -1115,6 +1179,9 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
       }
 
       this->imu_calibrated = true;
+      run_logger_->log("IMU_CALIBRATED",
+          "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+          " samples=" + std::to_string(num_samples));
 
     }
 
@@ -1128,6 +1195,10 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
     if (!first_imu_sample && dt <= 0.0) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                            "Skipping IMU sample with invalid dt: %.6f", dt);
+      run_logger_->log("IMU_REJECTED",
+          "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+          " reason=non_increasing_stamp dt=" +
+          to_string_with_precision(dt, 6));
       return;
     }
     if (dt > 0.05) {
@@ -1138,6 +1209,9 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
       dt = 1.0 / 200.0;
       geo.first_opt_done = false;
       state_history_.clear();
+      run_logger_->log("IMU_GAP",
+          "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+          " dt=" + to_string_with_precision(dt, 6));
     }
     this->imu_rates.push_back( 1./dt );
     if (imu_rates.size() > 200) imu_rates.erase(imu_rates.begin());
@@ -1167,6 +1241,16 @@ void dlio::OdomNode::callbackImu(const sensor_msgs::msg::Imu::SharedPtr imu_raw)
       // Geometric Observer: Propagate State
       this->propagateState();
     }
+    run_logger_->log("IMU_PROCESSED",
+        "stamp=" + to_string_with_precision(imu_stamp_secs, 9) +
+        " dt=" + to_string_with_precision(dt, 6) +
+        " accel=" + to_string_with_precision(lin_accel_corrected.x(), 6) + "," +
+        to_string_with_precision(lin_accel_corrected.y(), 6) + "," +
+        to_string_with_precision(lin_accel_corrected.z(), 6) +
+        " gyro=" + to_string_with_precision(ang_vel_corrected.x(), 6) + "," +
+        to_string_with_precision(ang_vel_corrected.y(), 6) + "," +
+        to_string_with_precision(ang_vel_corrected.z(), 6) +
+        " propagated=" + std::to_string(geo.first_opt_done.load() ? 1 : 0));
 
   }
 

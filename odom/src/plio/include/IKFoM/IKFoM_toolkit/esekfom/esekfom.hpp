@@ -195,9 +195,9 @@ public:
 				return false;
 				// continue;
 			}
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> z = dyn_share.z;
+			const Matrix<scalar_type, Eigen::Dynamic, 1> &z = dyn_share.z;
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> R = dyn_share.R; 
-			Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x = dyn_share.h_x;
+			const Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> &h_x = dyn_share.h_x;
 			// Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_v = dyn_share.h_v;
 			dof_Measurement = h_x.rows();
 			m_noise = dyn_share.M_Noise;
@@ -218,14 +218,20 @@ public:
 				{
 					HPHT(m, m) += m_noise;
 				}
-				K_= PHT*HPHT.inverse();
+				// HPHT is positive definite after adding measurement noise.  Solve
+				// the system directly instead of materializing its dense inverse.
+				const Eigen::LDLT<Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>>
+					solver(HPHT);
+				K_ = solver.solve(PHT.transpose()).transpose();
 			}
 			else
 			{
 				Matrix<scalar_type, 12, 12> HTH = h_x.transpose() * h_x / m_noise;
-				Matrix<scalar_type, n, n> P_inv = P_.inverse();
+				Matrix<scalar_type, n, n> P_inv = P_.ldlt().solve(
+					Matrix<scalar_type, n, n>::Identity());
 				P_inv.template block<12, 12>(0, 0) += HTH;
-				P_inv = P_inv.inverse();
+				P_inv = P_inv.ldlt().solve(
+					Matrix<scalar_type, n, n>::Identity());
 				K_ = P_inv.template block<n, 12>(0, 0) * h_x.transpose() / m_noise;
 			}
 			Matrix<scalar_type, n, 1> dx_ = K_ * z; // - h) + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 

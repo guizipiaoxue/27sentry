@@ -1,39 +1,46 @@
 /**:
   ros__parameters:
+    # 世界坐标系和机体坐标系名称。
     frames.world: odom
     frames.body: gimbal
+    # TF、路径和关键帧话题发布开关。
     publish.tf: true
     publish.path: true
     publish.keyframes: true
+    # 关键帧触发阈值：移动距离（米）或旋转角度（度）。
     keyframe.distance_m: 1.0
     keyframe.rotation_deg: 45.0
+    # 路径最多保留的位姿数量，以及状态/TF 发布频率（Hz）。
     publish.path_capacity: 10000
     publish.state_rate_hz: 100.0
-    # Bound IMU gaps/wall-clock staleness; outputs use the sensor timestamp.
+    # 限制 IMU 数据间隔和墙钟数据过期时间（秒）；输出仍使用传感器时间戳。
     publish.max_extrapolation_seconds: 0.05
     publish.max_correction_age_seconds: 0.5
+    # 是否在终端显示实时仪表盘；clear_screen 控制是否每次刷新时清屏。
     terminal.enabled: true
     terminal.clear_screen: true
+    # 是否记录高频 IMU 调试日志；开启会增加格式化、锁和磁盘写入开销。
+    runlog.enabled: false
+    # 运行日志保存目录；相对路径基于程序工作目录。
     runlog.directory: runlog
 
-    # Keep reception independent from Point-LIO processing. The callback only
-    # validates and queues a cloud; the processing timer runs the estimator.
+    # 点云接收队列深度、待处理队列容量和估计器处理定时周期（毫秒）。
     input.cloud_queue_depth: 100
     input.pending_queue_size: 50
     input.processing_period_ms: 1
 
-    # Both streams are already transformed/calibrated into the gimbal frame by
-    # fusion_ws, so the remaining virtual lidar-to-IMU extrinsic is identity.
+    # 是否在线估计雷达与 IMU 外参。融合节点已将数据变换到云台坐标系时使用单位外参。
     mapping.extrinsic_est_en: false
     mapping.extrinsic_T: [0.0, 0.0, 0.0]
     mapping.extrinsic_R: [1.0, 0.0, 0.0,
                           0.0, 1.0, 0.0,
                           0.0, 0.0, 1.0]
     mapping.gravity: [0.0, 0.0, -9.80665]
+    # 雷达有效测距上限（米）、平面拟合距离阈值（米）和匹配门限。
     mapping.det_range: 100.0
     mapping.plane_thr: 0.10
     mapping.match_s: 81.0
-    # MID360 Point-LIO R (measurement) and Q (process) covariance defaults.
+    # MID360 Point-LIO 测量噪声和过程噪声协方差参数；数值会影响状态对传感器的信任程度。
     mapping.lidar_meas_cov: 0.01
     mapping.imu_meas_omg_cov: 0.01
     mapping.imu_meas_acc_cov: 0.01
@@ -43,30 +50,35 @@
     mapping.b_gyr_cov: 1.0e-4
     mapping.b_acc_cov: 1.0e-4
     mapping.ivox_grid_resolution: 0.30
-    mapping.ivox_nearby_type: 18
+    # iVox 邻域搜索类型；6 表示搜索相邻体素，可减少最近邻计算量。
+    mapping.ivox_nearby_type: 6
     mapping.initialization_points: 100
-    # Build several scans before trusting point-to-plane registration.
+    # 初始化所需点数和扫描帧数；增加帧数可延后匹配启用。
     mapping.initialization_scans: 5
-    # Bound both iVox memory and nearest-neighbor work in revisited cells.
-    mapping.ivox_max_points_per_voxel: 64
-    # Hard upper bound after voxel filtering, before point-wise matching.
+    # 每个体素最多保存的点数；减小可降低内存和匹配计算量。
+    mapping.ivox_max_points_per_voxel: 32
+    # 体素滤波后参与逐点匹配的点数上限；减小可加速但可能损失精度。
     mapping.max_tracking_points: 1200
-    # Batch points acquired within 1 ms into one filter update. Set 0 to disable.
-    mapping.point_time_bin_ms: 1.0
+    # 点时间分箱宽度（毫秒）；增大可减少重复去畸变/滤波更新，但快速转动时会增加运动畸变。
+    # 设置为 0 可关闭分箱。
+    mapping.point_time_bin_ms: 2.0
 
+    # IMU 初始化样本数，以及陀螺仪均值/标准差、加速度计标准差和重力误差阈值。
     imu.initialization_samples: 100
     imu.initialization_max_gyro_mean: 0.05
     imu.initialization_max_gyro_stddev: 0.02
     imu.initialization_max_accel_stddev: 0.30
     imu.initialization_max_gravity_error: 0.75
-    # Fixed-yaw cloud/IMU calibration, 20260919_205858. Specific force m/s^2.
-    # These values belong to this dual-lidar mounting, not a generic MID360.
+    # 本机双雷达安装的固定偏航云台/IMU 标定旋转矩阵（按行展开）。
     imu.correction_rotation: [0.9999949702999255, -0.00000209278433299, -0.00317165106395461,
                               -0.00000209278433299, 0.9999991292231744, -0.00131967742767436,
                               0.00317165106395461, 0.00131967742767436, 0.9999940995230998]
+    # IMU 有效杆臂，单位米，按 x/y/z 排列；平滑时间单位秒。
     imu.effective_lever_arm: [0.010757780068684941, 0.020580770543404278, 0.0]
     imu.lever_smoothing_seconds: 0.02
-    # MID360 near-field returns often contain the sensor/gimbal itself.
+    # 近距离盲区半径（米），用于过滤雷达/云台自身的回波。
     preprocess.blind: 0.50
+    # 输入点云抽样步长；每隔 N 个点保留一个点。
     preprocess.point_filter_num: 2
+    # 表面体素滤波尺寸，单位米；增大可降低点数和计算量。
     filter_size_surf: 0.30

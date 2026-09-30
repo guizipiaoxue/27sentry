@@ -1,24 +1,38 @@
 mpc_control:
   ros__parameters:
+    # 地图、机器人本体和速度指令分别使用的 TF 坐标系。
     map_frame: map
     robot_frame: base_link
     command_frame: base_link
+    # MPC 控制周期，单位毫秒；50 表示控制频率为 20 Hz。
     control_period_ms: 50
+    # 预测时域步数；总预测时间约等于步数乘以控制周期。
     horizon_steps: 20
+    # 路径跟踪目标速度和允许的最大速度，单位米/秒。
     target_speed_mps: 1.0
     max_speed_mps: 1.0
+    # 允许的最大纵向加速度，单位米/秒²。
     max_accel_mps2: 1.5
+    # 速度指令一阶响应时间常数，单位秒；越小响应越快。
     velocity_time_constant_sec: 0.15
+    # 到达目标点的判定距离，单位米。
     goal_tolerance_m: 0.15
+    # 路径消息超过此时间未更新时视为失效，单位秒。
     path_timeout_sec: 15.0
+    # TF 查询超时时间，单位秒。
     tf_timeout_sec: 0.3
+    # 底盘速度反馈超时时间，单位秒。
     feedback_timeout_sec: 0.3
+    # 速度反馈低通滤波系数，取值越大越跟随新测量。
     velocity_filter_gain: 0.35
+    # 底盘反馈 Y 轴方向修正系数；-1 表示反转 Y 方向。
     chassis_feedback_y_sign: -1.0
+    # MPC 目标函数权重：位置误差、速度误差、控制量、控制平滑度和终端误差。
     position_weight: 12.0
     velocity_weight: 2.0
     control_weight: 0.05
     smoothness_weight: 1.5
     terminal_weight: 20.0
+    # 优化器最大迭代次数和收敛容差；提高迭代数可能增加计算时间。
     solver_max_iterations: 150
     solver_tolerance: 0.0001

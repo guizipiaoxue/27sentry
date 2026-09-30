@@ -1,7 +1,12 @@
 receiver:
   ros__parameters:
+    # 云台反馈串口设备路径；设备号变化时可改为对应的 /dev/tty*。
     device: /dev/ttyACM0
+    # 串口波特率，必须与下位机配置一致。
     baud_rate: 115200
+    # 读取串口的周期，单位毫秒；数值越小轮询越频繁。
     poll_period_ms: 5
+    # 串口断开后尝试重新连接的间隔，单位毫秒。
     reconnect_period_ms: 1000
+    # 发布云台反馈使用的 TF 坐标系名称。
     frame_id: gimbal

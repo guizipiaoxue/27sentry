@@ -72,6 +72,14 @@ struct Result {
   std::size_t map_voxels = 0;
   double scan_start = 0.0;
   double scan_end = 0.0;
+  // Time spent inside the estimator, in milliseconds. These fields are
+  // diagnostic only and let the runtime report the actual hot stage.
+  double preprocess_ms = 0.0;
+  double matching_ms = 0.0;
+  double ekf_update_ms = 0.0;
+  double tracking_ms = 0.0;
+  double map_update_ms = 0.0;
+  double output_ms = 0.0;
   Cloud::Ptr registered{new Cloud};
   Cloud::Ptr body{new Cloud};
 };

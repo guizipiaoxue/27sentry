@@ -1,12 +1,22 @@
 sender:
   ros__parameters:
+    # 底盘控制串口设备路径；设备号变化时可改为对应的 /dev/tty*。
     device: /dev/ttyACM0
+    # 串口波特率，必须与下位机配置一致。
     baud_rate: 115200
+    # 控制指令发送周期，单位毫秒；20 表示约 50 Hz。
     control_period_ms: 20
+    # 串口断开后尝试重新连接的间隔，单位毫秒。
     reconnect_period_ms: 1000
+    # 单次串口写操作允许等待的最长时间，单位毫秒。
     write_timeout_ms: 20
+    # 控制指令超过此时间未更新就视为过期，单位毫秒。
     command_timeout_ms: 150
+    # 底盘反馈超过此时间未收到就视为超时，单位毫秒。
     feedback_timeout_ms: 500
+    # 坐标/目标数据允许的最大年龄，单位毫秒。
     coordinate_max_age_ms: 2000
+    # 两次坐标/目标数据发送之间的最短间隔，单位毫秒。
     coordinate_min_period_ms: 100
+    # 底盘线速度限幅，单位米/秒。
     max_speed_mps: 2.4

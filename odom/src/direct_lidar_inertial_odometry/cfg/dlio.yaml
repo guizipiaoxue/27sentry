@@ -13,14 +13,18 @@
 /**:
   ros__parameters:
 
+    # DLIO 软件版本和是否启用自适应参数。
     version: 1.1.1
 
     adaptive: true
+    # 运行日志保存目录。
     runlog/directory: runlog
 
+    # 是否对点云去畸变和体素化。
     pointcloud/deskew: true
     pointcloud/voxelize: true
 
+    # 是否执行 IMU 标定；加速度计偏置、比例矩阵和陀螺仪偏置。
     imu/calibration: true
     imu/intrinsics/accel/bias: [ 0.0, 0.0, 0.0 ]
     imu/intrinsics/accel/sm:   [ 1.,  0.,  0.,
@@ -28,6 +32,7 @@
                                  0.,  0.,  1. ]
     imu/intrinsics/gyro/bias: [ 0.0, 0.0, 0.0 ]
 
+    # base_link 到 IMU 和雷达的外参；平移单位米，旋转矩阵按行展开。
     extrinsics/baselink2imu/t: [ 0.006253, -0.011775, 0.007645 ] 
     extrinsics/baselink2imu/R: [ 1.,  0.,  0.,
                                  0.,  1.,  0.,

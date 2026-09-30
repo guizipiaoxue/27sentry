@@ -79,6 +79,11 @@ class IVox {
     /// get nn with condition
     bool GetClosestPoint(const PointType& pt, PointVector& closest_pt, int max_num = 5, double max_range = 5.0);
 
+    /// get nn with condition, reusing caller-owned candidate storage
+    bool GetClosestPoint(const PointType& pt, PointVector& closest_pt,
+                         int max_num, double max_range,
+                         std::vector<DistPoint>& candidates);
+
     /// get nn in cloud
     bool GetClosestPoint(const PointVector& cloud, PointVector& closest_cloud);
 
@@ -140,6 +145,18 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
                                                       double max_range) {
     std::vector<DistPoint> candidates;
     candidates.reserve(max_num * nearby_grids_.size());
+    return GetClosestPoint(pt, closest_pt, max_num, max_range, candidates);
+}
+
+template <int dim, IVoxNodeType node_type, typename PointType>
+bool IVox<dim, node_type, PointType>::GetClosestPoint(
+    const PointType& pt, PointVector& closest_pt, int max_num,
+    double max_range, std::vector<DistPoint>& candidates) {
+    candidates.clear();
+    if (max_num <= 0) {
+        closest_pt.clear();
+        return false;
+    }
 
     auto key = Pos2Grid(ToEigen<float, dim>(pt));
 
@@ -159,7 +176,7 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
 #ifdef INNER_TIMER
             auto t1 = std::chrono::high_resolution_clock::now();
 #endif
-            auto tmp = iter->second->second.KNNPointByCondition(candidates, pt, max_num, max_range);
+            iter->second->second.KNNPointByCondition(candidates, pt, max_num, max_range);
 #ifdef INNER_TIMER
             auto t2 = std::chrono::high_resolution_clock::now();
             auto knn = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
@@ -176,12 +193,10 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
     auto t1 = std::chrono::high_resolution_clock::now();
 #endif
 
-    if (candidates.size() <= max_num) {
-    } else {
+    if (candidates.size() > static_cast<std::size_t>(max_num)) {
         std::nth_element(candidates.begin(), candidates.begin() + max_num - 1, candidates.end());
         candidates.resize(max_num);
     }
-    std::nth_element(candidates.begin(), candidates.begin(), candidates.end());
 
 #ifdef INNER_TIMER
     auto t2 = std::chrono::high_resolution_clock::now();

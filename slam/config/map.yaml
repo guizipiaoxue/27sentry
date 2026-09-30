@@ -1,15 +1,17 @@
 /**:
   ros__parameters:
-    # DLIO keyframe clouds are already transformed into the odom frame.
+    # 地图坐标系；DLIO 关键帧点云已变换到 odom 坐标系。
     map.frame: odom
+    # 是否拒绝坐标系与 map.frame 不一致的关键帧。
     map.strict_frame: true
 
-    # Preserve dense keyframes. A 1 mm radius rejects numerical duplicates only.
+    # 地图点最小间距（米）；当前 1 毫米设置只移除数值重复点。
     map.min_point_spacing: 0.001
+    # 地图点 Z 高度过滤范围（米）。
     map.min_z: -1000.0
     map.max_z: 1000.0
-    # Hard safety limit; 20 million PointXYZI values use about 320 MB before
-    # accounting for the KD-tree index and temporary insertion buffers.
+    # 地图最大点数上限；点数越大占用内存越多。
     map.max_points: 20000000
 
+    # 保存地图的 PCD 文件路径；相对路径基于程序工作目录。
     map.save_path: maps/dlio_kdtree_map.pcd

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -109,7 +110,10 @@ class FusionPcl final : public rclcpp::Node {
     transforms_[1] = loadTransform(lidar3_calibration);
 
     const auto qos = rclcpp::SensorDataQoS();
-    const auto output_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+    // PointCloud2 samples are large.  Keep enough reliable history for a
+    // temporarily busy subscriber without forcing the producer to overwrite
+    // samples immediately.
+    const auto output_qos = rclcpp::QoS(rclcpp::KeepLast(50)).reliable();
     cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
         cloud_output_topic_, output_qos);
     imu_pub_ = create_publisher<Imu>(imu_output_topic_, output_qos);
@@ -252,6 +256,7 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void cloudCallback(std::size_t index, CustomMsg::ConstSharedPtr message) {
+    ++cloud_received_[index];
     cloud_queues_[index].push_back(
         {rclcpp::Time(message->header.stamp), std::move(message)});
     limitQueue(cloud_queues_[index]);
@@ -272,6 +277,7 @@ class FusionPcl final : public rclcpp::Node {
       } else {
         const std::size_t older = dt < 0.0 ? 0 : 1;
         cloud_queues_[older].pop_front();
+        ++cloud_dropped_[older];
         RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 3000,
             "dropping unsynchronized lidar%zu cloud (delta %.3f s)",
@@ -283,6 +289,7 @@ class FusionPcl final : public rclcpp::Node {
   void publishCloudPair(
       const TimedMessage<CustomMsg> &lidar5,
       const TimedMessage<CustomMsg> &lidar3) {
+    const auto begin = std::chrono::steady_clock::now();
     // Keep the later packet stamp used by the 1c37bd6 fusion pipeline. Point
     // offsets include each packet's signed header delta, so their absolute
     // acquisition times remain correct even when the earlier packet is first.
@@ -291,16 +298,47 @@ class FusionPcl final : public rclcpp::Node {
     Cloud::Ptr fused = transformCloud(
         *lidar5.message, transforms_[0],
         (lidar5.stamp - output_stamp).seconds());
+    const auto after_lidar5 = std::chrono::steady_clock::now();
     const Cloud::Ptr cloud3 = transformCloud(
         *lidar3.message, transforms_[1],
         (lidar3.stamp - output_stamp).seconds());
+    const auto after_lidar3 = std::chrono::steady_clock::now();
     *fused += *cloud3;
+    const auto after_concat = std::chrono::steady_clock::now();
 
     sensor_msgs::msg::PointCloud2 output;
     pcl::toROSMsg(*fused, output);
+    const auto after_serialize = std::chrono::steady_clock::now();
     output.header.frame_id = frame_id_;
     output.header.stamp = output_stamp;
     cloud_pub_->publish(output);
+    const auto after_publish = std::chrono::steady_clock::now();
+
+    ++cloud_pairs_;
+    cloud_transform5_seconds_ += std::chrono::duration<double>(
+        after_lidar5 - begin).count();
+    cloud_transform3_seconds_ += std::chrono::duration<double>(
+        after_lidar3 - after_lidar5).count();
+    cloud_concat_seconds_ += std::chrono::duration<double>(
+        after_concat - after_lidar3).count();
+    cloud_serialize_seconds_ += std::chrono::duration<double>(
+        after_serialize - after_concat).count();
+    cloud_publish_seconds_ += std::chrono::duration<double>(
+        after_publish - after_serialize).count();
+    if (cloud_pairs_ % 100 == 0) {
+      const double count = static_cast<double>(cloud_pairs_);
+      RCLCPP_INFO(
+          get_logger(),
+          "fusion cloud timing over %zu pairs: lidar5 %.3f ms, lidar3 %.3f "
+          "ms, concat %.3f ms, serialize %.3f ms, publish %.3f ms; "
+          "received %zu/%zu, dropped %zu/%zu",
+          cloud_pairs_, cloud_transform5_seconds_ * 1.0e3 / count,
+          cloud_transform3_seconds_ * 1.0e3 / count,
+          cloud_concat_seconds_ * 1.0e3 / count,
+          cloud_serialize_seconds_ * 1.0e3 / count,
+          cloud_publish_seconds_ * 1.0e3 / count, cloud_received_[0],
+          cloud_received_[1], cloud_dropped_[0], cloud_dropped_[1]);
+    }
   }
 
   void imuCallback(std::size_t index, Imu::ConstSharedPtr message) {
@@ -558,6 +596,14 @@ class FusionPcl final : public rclcpp::Node {
       Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity()};
 
   std::array<std::deque<TimedMessage<CustomMsg>>, 2> cloud_queues_;
+  std::array<std::size_t, 2> cloud_received_ = {0, 0};
+  std::array<std::size_t, 2> cloud_dropped_ = {0, 0};
+  std::size_t cloud_pairs_ = 0;
+  double cloud_transform5_seconds_ = 0.0;
+  double cloud_transform3_seconds_ = 0.0;
+  double cloud_concat_seconds_ = 0.0;
+  double cloud_serialize_seconds_ = 0.0;
+  double cloud_publish_seconds_ = 0.0;
   std::array<std::deque<TimedMessage<Imu>>, 2> imu_queues_;
   std::array<ImuCalibration, 2> calibrations_;
   std::array<rclcpp::Subscription<CustomMsg>::SharedPtr, 2> cloud_subs_;

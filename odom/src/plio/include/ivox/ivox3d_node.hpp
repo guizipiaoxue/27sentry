@@ -11,8 +11,12 @@ namespace faster_lio {
 // squared distance of two pcl points
 template <typename PointT>
 inline double distance2(const PointT& pt1, const PointT& pt2) {
-    Eigen::Vector3f d = pt1.getVector3fMap() - pt2.getVector3fMap();
-    return d.squaredNorm();
+    // This function runs for every point in every nearby voxel. Avoiding
+    // Eigen temporary vectors keeps the hot loop in scalar multiply-adds.
+    const double dx = static_cast<double>(pt1.x) - pt2.x;
+    const double dy = static_cast<double>(pt1.y) - pt2.y;
+    const double dz = static_cast<double>(pt1.z) - pt2.z;
+    return dx * dx + dy * dy + dz * dz;
 }
 
 // convert from pcl point to eigen

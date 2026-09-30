@@ -12,43 +12,56 @@
 
 /**:
   ros__parameters:
+    # 是否使用仿真时钟，以及里程计/机器人/雷达/IMU 坐标系名称。
     use_sim_time: false
     frames/odom: odom
     frames/baselink: base_link
     frames/lidar: livox_frame
     frames/imu: imu
+    # 运行日志目录；相对路径基于程序工作目录。
     runlog/directory: runlog
 
+    # 等待机器人移动后再建图；是否对稠密地图额外滤波。
     map/waitUntilMove: true
     map/dense/filtered: false
+    # 稀疏地图体素尺寸，单位米；增大可减少地图点数和计算量。
     map/sparse/leafSize: 0.25
 
+    # 重力加速度大小，单位米/秒²；是否估计雷达与 IMU 的时间偏移。
     odom/gravity: 9.80665
     odom/computeTimeOffset: true
 
+    # IMU 重力方向近似估计和陀螺仪/加速度计标定开关。
     odom/imu/approximateGravity: true
     odom/imu/calibration/gyro: true
     odom/imu/calibration/accel: true
+    # IMU 标定持续时间，单位秒；IMU 环形缓冲区容量（样本数）。
     odom/imu/calibration/time: 3.0
     odom/imu/bufferSize: 5000
 
+    # 点云裁剪框尺寸和里程计体素尺寸，单位米。
     odom/preprocessing/cropBoxFilter/size: 1.0
     odom/preprocessing/voxelFilter/res: 0.25
 
+    # 关键帧触发的平移距离（米）和旋转角度（度）。
     odom/keyframe/threshD: 1.0
     odom/keyframe/threshR: 45.0
 
+    # 子地图关键帧的近邻数、候选数和约束数。
     odom/submap/keyframe/knn: 10
     odom/submap/keyframe/kcv: 10
     odom/submap/keyframe/kcc: 10
+    # GICP 最少点数、对应点数、最大对应距离（米）和最大迭代数。
     odom/gicp/minNumPoints: 64
     odom/gicp/kCorrespondences: 16
     odom/gicp/maxCorrespondenceDistance: 0.5
     odom/gicp/maxIterations: 32
+    # GICP 平移/旋转收敛阈值和初始阻尼因子。
     odom/gicp/transformationEpsilon: 0.01
     odom/gicp/rotationEpsilon: 0.01
     odom/gicp/initLambdaFactor: 1e-9
 
+    # 几何状态估计器增益，以及加速度计/陀螺仪偏置允许的最大值。
     odom/geo/Kp: 4.5
     odom/geo/Kv: 11.25
     odom/geo/Kq: 4.0

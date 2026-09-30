@@ -1,31 +1,45 @@
 /**:
   ros__parameters:
-    # Scan Context loop candidate search followed by GICP verification.
+    # 回环检测使用 Scan Context 描述子，再用 GICP 验证候选回环。
+    # 描述子环数、扇区数和最大描述半径（米）；增大分辨率会增加计算量。
     detector.rings: 20
     detector.sectors: 60
     detector.max_radius: 80.0
+    # 构建描述子前的点云体素尺寸（米）。
     detector.voxel_size: 0.25
+    # 描述子相似度阈值；影响候选回环的严格程度。
     detector.descriptor_threshold: 0.20
+    # 每次最多送入几组候选进行几何验证。
     detector.num_candidates: 5
+    # 忽略最近的关键帧数量，避免把相邻帧识别成回环。
     detector.exclusion_recent: 30
+    # 两个关键帧至少相隔的行进距离（米）。
     detector.min_travel_distance: 10.0
+    # GICP 最大对应点距离（米）和最大迭代次数。
     detector.icp_max_correspondence: 2.0
     detector.icp_iterations: 40
+    # GICP 适应度上限；低于该值的匹配才会被接受。
     detector.max_fitness: 0.35
 
-    # GTSAM Pose3/iSAM2 backend. Rotation sigmas are specified in degrees.
+    # 位姿图优化坐标系名称。
     backend.map_frame: map
     backend.odom_frame: odom
+    # 初始位姿先验噪声标准差：平移单位米，旋转单位度。
     backend.prior_translation_sigma: 0.01
     backend.prior_rotation_sigma_deg: 0.1
+    # 相邻里程计约束噪声标准差：平移单位米，旋转单位度。
     backend.odom_translation_sigma: 0.10
     backend.odom_rotation_sigma_deg: 1.0
+    # 回环约束噪声标准差：平移单位米，旋转单位度。
     backend.loop_translation_sigma: 0.15
     backend.loop_rotation_sigma_deg: 2.0
+    # Huber 鲁棒核尺度，用于降低异常回环约束的影响。
     backend.loop_huber_scale: 1.345
+    # iSAM2 重线性化阈值和检查间隔；间隔越小，优化检查越频繁。
     backend.relinearize_threshold: 0.01
     backend.relinearize_skip: 1
+    # 每次更新位姿图时的额外优化迭代次数。
     backend.optimization_iterations: 2
 
-    # Full-resolution optimized PCD output (no voxel downsampling).
+    # 保存优化后完整分辨率地图的路径；相对路径相对于程序工作目录。
     backend.save_path: maps/optimized_map.pcd

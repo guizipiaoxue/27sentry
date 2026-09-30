@@ -1,32 +1,42 @@
 /**:
   ros__parameters:
+    # 是否使用仿真时钟；实机运行保持 false。
     use_sim_time: false
+    # 算法版本标识及是否启用自适应参数。
     version: 1.1.1
     adaptive: true
+    # 里程计、机器人本体、雷达和 IMU 的 TF 坐标系名称。
     frames/odom: odom
     frames/baselink: gimbal
     frames/lidar: fusion_lidar
     frames/imu: fusion_imu
+    # 是否发布位姿里程计和关键帧；状态输出频率单位 Hz，路径容量单位点数。
     publish/pose_odom: true
     publish/keyframes: true
     publish/state_rate_hz: 100.0
     publish/path_capacity: 10000
+    # 是否在终端显示运行状态；日志文件输出目录。
     terminal/enabled: true
     runlog/directory: runlog
+    # 点云去畸变、体素滤波及 IMU 标定开关。
     pointcloud/deskew: true
     pointcloud/voxelize: true
     imu/calibration: true
-    # This mounting's virtual fused IMU correction; g/rad/s conversion is upstream.
+    # 当前云台安装的融合 IMU 方向修正矩阵（按行展开）；单位转换已在上游完成。
     imu/fused_correction_R: [0.9999949702999255, -0.00000209278433299, -0.00317165106395461,
                              -0.00000209278433299, 0.9999991292231744, -0.00131967742767436,
                              0.00317165106395461, 0.00131967742767436, 0.9999940995230998]
+    # 融合 IMU 的有效杆臂，单位米，按 x/y/z 排列。
     imu/fused_lever_arm: [0.010757780068684941, 0.020580770543404278, 0.0]
+    # 杆臂补偿平滑时间，单位秒。
     imu/lever_smoothing_seconds: 0.02
+    # 加速度计偏置、比例矩阵和陀螺仪偏置；比例矩阵按行展开。
     imu/intrinsics/accel/bias: [0.0, 0.0, 0.0]
     imu/intrinsics/accel/sm: [1.0, 0.0, 0.0,
                                0.0, 1.0, 0.0,
                                0.0, 0.0, 1.0]
     imu/intrinsics/gyro/bias: [0.0, 0.0, 0.0]
+    # base_link 到 IMU/雷达的外参：平移单位米，旋转矩阵按行展开。
     extrinsics/baselink2imu/t: [0.0, 0.0, 0.0]
     extrinsics/baselink2imu/R: [1.0, 0.0, 0.0,
                                 0.0, 1.0, 0.0,
@@ -35,31 +45,42 @@
     extrinsics/baselink2lidar/R: [1.0, 0.0, 0.0,
                                   0.0, 1.0, 0.0,
                                   0.0, 0.0, 1.0]
+    # 是否在线估计雷达与 IMU 的时间偏移；重力大小单位米/秒²。
     odom/computeTimeOffset: false
     odom/gravity: 9.80665
+    # 是否根据静止数据近似估计重力方向，以及是否标定陀螺仪/加速度计。
     odom/imu/approximateGravity: true
     odom/imu/calibration/gyro: true
     odom/imu/calibration/accel: true
-    # Additional static gravity alignment after upstream dual-IMU calibration.
-    odom/imu/calibration/time: 0.5
+    # 静态重力对齐时长，单位秒；此配置用于上游双 IMU 标定后的补充对齐。
+    odom/imu/calibration/time: 3
+    # IMU 缓冲区最大样本数。
     odom/imu/bufferSize: 5000
+    # 关键帧触发阈值：平移距离单位米，旋转角度单位度。
     odom/keyframe/threshD: 1.0
-    odom/keyframe/threshR: 45.0
-    # Sparse scan used only for GICP odometry; mapping publishes a dense copy.
+    odom/keyframe/threshR: 30.0
+    # GICP 里程计输入体素尺寸（米）；越大点越少、计算越快但细节越少。
     odom/preprocessing/voxelFilter/res: 0.25
+    # 每帧最多参与里程计匹配的点数上限。
     odom/preprocessing/maxPoints: 1500
+    # 点云/GICP 使用的工作线程数。
     odom/threads: 4
-    odom/preprocessing/cropBoxFilter/size: 1.0
+    # 裁剪框尺寸（米），用于移除机器人附近的点。
+    odom/preprocessing/cropBoxFilter/size: 0.3
+    # 子地图关键帧搜索参数：近邻数、候选数和约束数。
     odom/submap/keyframe/knn: 10
     odom/submap/keyframe/kcv: 10
     odom/submap/keyframe/kcc: 10
+    # GICP 最少点数、对应点数量、最大对应距离（米）和迭代上限。
     odom/gicp/minNumPoints: 64
-    odom/gicp/kCorrespondences: 16
+    odom/gicp/kCorrespondences: 32
     odom/gicp/maxCorrespondenceDistance: 0.5
-    odom/gicp/maxIterations: 32
+    odom/gicp/maxIterations: 64
+    # GICP 平移/旋转收敛阈值，以及初始阻尼因子。
     odom/gicp/transformationEpsilon: 0.01
     odom/gicp/rotationEpsilon: 0.01
     odom/gicp/initLambdaFactor: 1.0e-9
+    # 几何状态估计器增益及加速度计/陀螺仪偏置限幅。
     odom/geo/Kp: 4.5
     odom/geo/Kv: 11.25
     odom/geo/Kq: 4.0
@@ -67,4 +88,5 @@
     odom/geo/Kgb: 1.0
     odom/geo/abias_max: 5.0
     odom/geo/gbias_max: 0.5
+    # 稀疏地图体素尺寸，单位米。
     map/sparse/leafSize: 0.25

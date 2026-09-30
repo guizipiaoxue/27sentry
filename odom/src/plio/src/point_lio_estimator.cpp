@@ -1,14 +1,14 @@
 #include "plio/point_lio_estimator.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
 #include <limits>
-#include <utility>
-#include <map>
-#include <tuple>
 #include <stdexcept>
+#include <unordered_map>
+#include <utility>
 
 #include "plio/point_lio_core.hpp"
 
@@ -57,6 +57,33 @@ namespace {
 
 constexpr int kNeighbors = 5;
 
+struct VoxelKey {
+  int x = 0;
+  int y = 0;
+  int z = 0;
+
+  bool operator==(const VoxelKey &other) const {
+    return x == other.x && y == other.y && z == other.z;
+  }
+};
+
+struct VoxelKeyHash {
+  std::size_t operator()(const VoxelKey &key) const noexcept {
+    std::size_t hash = std::hash<int>{}(key.x);
+    hash ^= std::hash<int>{}(key.y) + static_cast<std::size_t>(0x9e3779b9) +
+        (hash << 6) + (hash >> 2);
+    hash ^= std::hash<int>{}(key.z) + static_cast<std::size_t>(0x9e3779b9) +
+        (hash << 6) + (hash >> 2);
+    return hash;
+  }
+};
+
+struct Match {
+  Eigen::Vector3d normal;
+  Eigen::Vector3d body;
+  double residual = 0.0;
+};
+
 struct MeasurementContext {
   const Cloud *body = nullptr;
   Cloud *world = nullptr;
@@ -71,6 +98,9 @@ struct MeasurementContext {
   std::size_t begin = 0;
   std::size_t end = 0;
   std::size_t *matched_points = nullptr;
+  std::vector<Match> *matches = nullptr;
+  std::vector<core::IVox::DistPoint> *candidates = nullptr;
+  double *matching_ms = nullptr;
 };
 
 thread_local MeasurementContext *measurement_context = nullptr;
@@ -133,9 +163,15 @@ bool fitPlane(
   for (int i = 0; i < kNeighbors; ++i) {
     coordinates.row(i) << points[i].x, points[i].y, points[i].z;
   }
-  const Eigen::Matrix<double, kNeighbors, 1> rhs =
-      -Eigen::Matrix<double, kNeighbors, 1>::Ones();
-  Eigen::Vector3d normal = coordinates.colPivHouseholderQr().solve(rhs);
+  // The plane has only three unknowns. Solving the fixed-size normal
+  // equations avoids constructing a QR factorization for every matched
+  // point while retaining the same residual and degeneracy checks below.
+  const Eigen::Matrix3d normal_matrix = coordinates.transpose() * coordinates;
+  const Eigen::Vector3d rhs =
+      -coordinates.transpose() * Eigen::Matrix<double, kNeighbors, 1>::Ones();
+  const Eigen::LDLT<Eigen::Matrix3d> solver(normal_matrix);
+  if (solver.info() != Eigen::Success) return false;
+  const Eigen::Vector3d normal = solver.solve(rhs);
   if (!normal.allFinite() || normal.norm() < 1.0e-8) {
     return false;
   }
@@ -162,14 +198,19 @@ void lidarMeasurement(
     return;
   }
 
-  struct Match {
-    Eigen::Vector3d normal;
-    Eigen::Vector3d body;
-    double residual;
-  };
-  std::vector<Match> matches;
+  std::vector<Match> local_matches;
+  std::vector<Match> &matches = measurement_context->matches != nullptr
+      ? *measurement_context->matches : local_matches;
+  matches.clear();
   matches.reserve(measurement_context->end - measurement_context->begin);
+  std::vector<core::IVox::DistPoint> local_candidates;
+  std::vector<core::IVox::DistPoint> &candidates =
+      measurement_context->candidates != nullptr
+          ? *measurement_context->candidates : local_candidates;
+  candidates.clear();
+  candidates.reserve(kNeighbors * 18);
 
+  const auto matching_begin = std::chrono::steady_clock::now();
   for (std::size_t i = measurement_context->begin;
        i < measurement_context->end; ++i) {
     const Point &body_point = measurement_context->body->points[i];
@@ -177,7 +218,7 @@ void lidarMeasurement(
     transformPoint(state, body_point, world_point);
     auto &nearby = (*measurement_context->nearest)[i];
     measurement_context->map->GetClosestPoint(
-        world_point, nearby, kNeighbors);
+        world_point, nearby, kNeighbors, 5.0, candidates);
     Eigen::Vector4d plane;
     if (!fitPlane(plane, nearby, measurement_context->plane_threshold)) {
       continue;
@@ -189,6 +230,11 @@ void lidarMeasurement(
     if (body.norm() > measurement_context->match_scale * residual * residual) {
       matches.push_back({plane.head<3>(), body, residual});
     }
+  }
+  if (measurement_context->matching_ms != nullptr) {
+    *measurement_context->matching_ms +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - matching_begin).count();
   }
 
   if (matches.empty()) {
@@ -298,6 +344,7 @@ class PointLioEstimator::Impl {
   }
 
   Result process(const Cloud::ConstPtr &input, double stamp) {
+    const auto process_begin = std::chrono::steady_clock::now();
     Result result;
     result.stamp = stamp;
     result.input_points = input == nullptr ? 0 : input->size();
@@ -328,17 +375,24 @@ class PointLioEstimator::Impl {
     // Keep an actual measurement (including acquisition time), never a
     // centroid of returns acquired at different poses during a scan.
     Cloud::Ptr filtered(new Cloud);
-    std::map<std::tuple<int, int, int>, std::pair<std::size_t, double>> cells;
+    // Voxel selection is on the hot path for every scan.  The previous
+    // std::map caused one heap-backed tree lookup per point; hashing the
+    // integer voxel coordinates keeps the same representative-point policy
+    // while avoiding O(log N) tree work.
+    auto &cells = cells_workspace_;
+    cells.clear();
+    cells.reserve(valid->size() * 2);
     const double leaf = parameters_.surface_leaf_size;
     for (const auto &point : valid->points) {
       if (!std::isfinite(point.curvature)) continue;
       const int x = static_cast<int>(std::floor(point.x / leaf));
       const int y = static_cast<int>(std::floor(point.y / leaf));
       const int z = static_cast<int>(std::floor(point.z / leaf));
-      const double d = std::pow(point.x / leaf - x - 0.5, 2) +
-          std::pow(point.y / leaf - y - 0.5, 2) +
-          std::pow(point.z / leaf - z - 0.5, 2);
-      const auto key = std::make_tuple(x, y, z);
+      const double dx = point.x / leaf - x - 0.5;
+      const double dy = point.y / leaf - y - 0.5;
+      const double dz = point.z / leaf - z - 0.5;
+      const double d = dx * dx + dy * dy + dz * dz;
+      const VoxelKey key{x, y, z};
       const auto it = cells.find(key);
       if (it == cells.end()) {
         cells.emplace(key, std::make_pair(filtered->size(), d));
@@ -375,6 +429,8 @@ class PointLioEstimator::Impl {
     }
 
     result.filtered_points = filtered->size();
+    result.preprocess_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - process_begin).count();
     const auto bounds = std::minmax_element(valid->begin(), valid->end(),
         [](const Point &a, const Point &b) { return a.curvature < b.curvature; });
     result.scan_start = stamp + pointOffset(*bounds.first);
@@ -394,9 +450,11 @@ class PointLioEstimator::Impl {
     result.filtered_points = filtered->size();
     if (filtered->empty()) return result;
 
+    const auto tracking_begin = std::chrono::steady_clock::now();
     Cloud world;
     world.resize(filtered->size());
-    std::vector<core::PointVector> nearest(filtered->size());
+    nearest_workspace_.resize(filtered->size());
+    auto &nearest = nearest_workspace_;
     std::size_t begin = 0;
     while (begin < filtered->size()) {
       std::size_t end = begin + 1;
@@ -429,8 +487,14 @@ class PointLioEstimator::Impl {
         context.begin = begin;
         context.end = end;
         context.matched_points = &result.matched_points;
+        context.matches = &matches_workspace_;
+        context.candidates = &candidate_workspace_;
+        context.matching_ms = &result.matching_ms;
         measurement_context = &context;
+        const auto update_begin = std::chrono::steady_clock::now();
         filter_.update_iterated_dyn_share_modified();
+        result.ekf_update_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - update_begin).count();
         measurement_context = nullptr;
       }
       for (std::size_t i = begin; i < end; ++i) {
@@ -443,12 +507,17 @@ class PointLioEstimator::Impl {
     world.width = static_cast<std::uint32_t>(world.size());
     world.height = 1;
     world.is_dense = true;
+    result.tracking_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tracking_begin).count();
+    const auto map_begin = std::chrono::steady_clock::now();
     if (!map_initialized_ && world.size() >= parameters_.initialization_points) {
       map_->AddPoints(world.points);
       map_initialized_ = ++initialization_scan_count_ >= parameters_.initialization_scans;
     } else if (map_initialized_) {
       map_->AddPoints(world.points);
     }
+    result.map_update_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - map_begin).count();
     discardImuBefore(scan_end);
 
     result.initialized = map_initialized_;
@@ -461,6 +530,7 @@ class PointLioEstimator::Impl {
     result.gyro_bias = filter_.x_.bg;
     result.accel_bias = filter_.x_.ba;
     result.map_voxels = map_->NumValidGrids();
+    const auto output_begin = std::chrono::steady_clock::now();
     *result.registered = world;
     *result.body = *filtered;
     for (std::size_t i = 0; i < world.size(); ++i) {
@@ -470,6 +540,8 @@ class PointLioEstimator::Impl {
       result.body->points[i].y = local.y();
       result.body->points[i].z = local.z();
     }
+    result.output_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - output_begin).count();
     return result;
   }
 
@@ -604,6 +676,11 @@ class PointLioEstimator::Impl {
   std::size_t initialization_scan_count_ = 0;
   ImuInitializationReport initialization_report_;
   double last_prediction_time_ = -1.0;
+  std::vector<core::PointVector> nearest_workspace_;
+  std::unordered_map<VoxelKey, std::pair<std::size_t, double>, VoxelKeyHash>
+      cells_workspace_;
+  std::vector<Match> matches_workspace_;
+  std::vector<core::IVox::DistPoint> candidate_workspace_;
 };
 
 PointLioEstimator::PointLioEstimator(Parameters parameters)

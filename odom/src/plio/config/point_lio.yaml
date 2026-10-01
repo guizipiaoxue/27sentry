@@ -9,7 +9,7 @@
     publish.keyframes: true
     # 关键帧触发阈值：移动距离（米）或旋转角度（度）。
     keyframe.distance_m: 1.0
-    keyframe.rotation_deg: 45.0
+    keyframe.rotation_deg: 30.0
     # 路径最多保留的位姿数量，以及状态/TF 发布频率（Hz）。
     publish.path_capacity: 10000
     publish.state_rate_hz: 100.0
@@ -58,7 +58,7 @@
     # 每个体素最多保存的点数；减小可降低内存和匹配计算量。
     mapping.ivox_max_points_per_voxel: 32
     # 体素滤波后参与逐点匹配的点数上限；减小可加速但可能损失精度。
-    mapping.max_tracking_points: 1200
+    mapping.max_tracking_points: 2000
     # 点时间分箱宽度（毫秒）；增大可减少重复去畸变/滤波更新，但快速转动时会增加运动畸变。
     # 设置为 0 可关闭分箱。
     mapping.point_time_bin_ms: 2.0
@@ -77,8 +77,8 @@
     imu.effective_lever_arm: [0.010757780068684941, 0.020580770543404278, 0.0]
     imu.lever_smoothing_seconds: 0.02
     # 近距离盲区半径（米），用于过滤雷达/云台自身的回波。
-    preprocess.blind: 0.50
+    preprocess.blind: 0.30
     # 输入点云抽样步长；每隔 N 个点保留一个点。
     preprocess.point_filter_num: 2
     # 表面体素滤波尺寸，单位米；增大可降低点数和计算量。
-    filter_size_surf: 0.30
+    filter_size_surf: 0.15

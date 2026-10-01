@@ -62,7 +62,7 @@
     # GICP 里程计输入体素尺寸（米）；越大点越少、计算越快但细节越少。
     odom/preprocessing/voxelFilter/res: 0.25
     # 每帧最多参与里程计匹配的点数上限。
-    odom/preprocessing/maxPoints: 1500
+    odom/preprocessing/maxPoints: 2000
     # 点云/GICP 使用的工作线程数。
     odom/threads: 4
     # 裁剪框尺寸（米），用于移除机器人附近的点。
@@ -89,4 +89,4 @@
     odom/geo/abias_max: 5.0
     odom/geo/gbias_max: 0.5
     # 稀疏地图体素尺寸，单位米。
-    map/sparse/leafSize: 0.25
+    map/sparse/leafSize: 0.15

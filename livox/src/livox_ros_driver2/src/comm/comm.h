@@ -170,6 +170,7 @@ typedef struct {
 typedef struct {
   uint32_t handle;
   uint8_t lidar_type; ////refer to LivoxLidarType
+  uint64_t generation;
   uint32_t points_num;
   PointXyzlt* points;
 } PointPacket;
@@ -185,6 +186,7 @@ typedef struct {
 typedef struct {
   LidarProtoType lidar_type;
   uint32_t handle;
+  uint64_t generation;
   uint64_t base_time;
   uint32_t points_num;
   std::vector<PointXyzlt> points;
@@ -197,6 +199,8 @@ typedef struct {
   uint32_t point_num;
   uint8_t data_type;
   uint8_t line_num;
+  uint8_t timestamp_type;
+  uint64_t generation;
   uint64_t time_stamp;
   uint64_t point_interval;
   std::vector<uint8_t> raw_data;

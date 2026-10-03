@@ -12,6 +12,7 @@ find_package(Eigen3 REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common)
 find_package(pcl_conversions REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -35,6 +36,7 @@ ament_target_dependencies(
   ament_index_cpp
   livox_ros_driver2
   pcl_conversions
+  rcl_interfaces
   rclcpp
   sensor_msgs
   std_msgs)

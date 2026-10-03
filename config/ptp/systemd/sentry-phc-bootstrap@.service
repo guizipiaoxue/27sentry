@@ -1,0 +1,11 @@
+[Unit]
+Description=Initialize only the %i PTP hardware clock from system UTC
+After=network.target
+Before=sentry-ptp4l@%i.service sentry-phc2sys@%i.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/sentry-ptp/ptp_phc_bootstrap.py --interface %i --config /etc/linuxptp/sentry/master-%i.conf --max-offset-ms 1
+TimeoutStartSec=45
+RemainAfterExit=yes
+

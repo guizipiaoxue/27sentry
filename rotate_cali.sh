@@ -23,6 +23,7 @@ Options:
 Useful environment variables:
   SDK_DIR, LIVOX_CONFIG, LIDAR5_TOPIC, LIDAR3_TOPIC, IMU5_TOPIC, IMU3_TOPIC
   LIDAR5_OUTPUT, LIDAR3_OUTPUT, MIN_DIRECTION_DEG, MAX_CIRCLE_RESIDUAL
+  PTP_UTC_OFFSET=37 (TAI) or 0 (UTC), PTP_CHECK_TIMEOUT, PTP_LOCK_TIMEOUT
 
 Live use needs no arguments:
   ./rotate_cali.sh
@@ -321,6 +322,8 @@ echo "  5. 两路轨迹都通过检查后才会写入 YAML；成功后脚本自�
 echo
 
 if [[ "${START_DRIVER}" == "1" ]]; then
+  source "${ROOT_DIR}/scripts/ptp_runtime.sh"
+  ptp_check_host "${ROOT_DIR}" "${LIVOX_CONFIG}"
   DRIVER_ARGS=(
     ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args
     -p xfer_format:=0
@@ -329,6 +332,9 @@ if [[ "${START_DRIVER}" == "1" ]]; then
     -p publish_freq:=10.0
     -p output_data_type:=0
     -p frame_id:=livox_frame
+    -p require_ptp_sync:=true
+    -p "ptp_utc_offset_seconds:=${PTP_UTC_OFFSET}"
+    -p use_sim_time:=false
     -p user_config_path:="${LIVOX_CONFIG}"
     -r "/livox/lidar_192_168_1_5:=${LIDAR5_TOPIC}"
     -r "/livox/lidar_192_168_1_3:=${LIDAR3_TOPIC}"
@@ -346,6 +352,7 @@ if [[ "${START_DRIVER}" == "1" ]]; then
     echo "[rotate_cali] Livox driver exited during startup." >&2
     wait "${DRIVER_PID}"
   fi
+  ptp_wait_sensors
 fi
 
 if [[ "${RECORD_ROSBAG}" == "1" ]]; then
@@ -356,6 +363,7 @@ if [[ "${RECORD_ROSBAG}" == "1" ]]; then
     --storage sqlite3 \
     "${LIDAR5_TOPIC}" "${LIDAR3_TOPIC}" \
     "${IMU5_TOPIC}" "${IMU3_TOPIC}" \
+    /livox/ptp_locked \
     /cali/lidar5/pose /cali/lidar3/pose \
     /parameter_events /rosout &
   RECORD_PID=$!
@@ -381,6 +389,7 @@ start_dlio() {
     -r "/tf:=${namespace}/tf" \
     -r "/tf_static:=${namespace}/tf_static" \
     -p "publish/keyframes:=false" \
+    -p "odom/computeTimeOffset:=false" \
     -p "frames/odom:=cali_${label}_odom" \
     -p "frames/baselink:=cali_${label}" \
     -p "frames/lidar:=${label}_lidar" \

@@ -2,6 +2,54 @@
 
 作者：彭友
 
+项目结构、构建顺序和数据时间戳约定见 [AGENT.md](AGENT.md)。
+
+## PTP 时间对齐
+
+双 MID360 的点云和内置 IMU 统一使用 UTC 采样时间。驱动逐设备、逐数据流
+检查 PTP 包，并发布 `/livox/ptp_locked`；融合在失锁或状态超时后清空缓存、
+停止输出并重新标定。未同步数据不会改成主机接收时间。
+
+本机硬件 PTP 的设备包使用 TAI，实测比主机 UTC 超前约 37 秒；驱动默认通过
+`ptp_utc_offset_seconds=37` 转换。使用 UTC 软件 PTP 时设置 `PTP_UTC_OFFSET=0`。
+主机检查会验证对应时间尺度，禁止根据首包接收延迟自动拟合偏移。
+
+项目提供 `sentry-ptp4l@enp86s0`、`sentry-phc2sys@enp86s0` 及仅初始化 PHC
+的 bootstrap 服务，配置和 UDS 按网卡隔离。安装会备份、停用并移除旧四个
+PTP/clock 服务，保留 linuxptp 工具和现有时钟管理 mask；系统 UTC 不会被校跳。
+
+```bash
+sudo bash scripts/install_ptp_services.sh --interface enp86s0 --utc-offset 37
+```
+
+PHC 已与 UTC + 37 秒匹配时 bootstrap 不 step；有实机采集进程且 PHC 超出
+容差时拒绝初始化。安装、复用、卸载流程见 [PTP 部署与验收](docs/PTP.md)。
+
+修改后先按 `livox → slam → odom` 重新构建，完整命令见
+[PTP 部署与验收](docs/PTP.md)。已有采集进程运行时，使用独立构建目录验证；
+新版驱动和融合节点需在下次启动时加载。
+本次构建、功能测试及现机只读检查记录见 [PTP 验证记录](docs/PTP_VALIDATION.md)。
+
+```bash
+# PTP 服务已运行时，启动入口会先检查主机及四路传感器锁定。
+./start_odom.sh --algorithm plio
+
+# 在另一终端 source ROS 2 与 livox/install/setup.bash 后检查采样时间。
+python3 scripts/check_sensor_time.py --duration 10 --include-fused
+```
+
+`start_mapping.sh`、实机 `rotate_cali.sh` 和 `odom/start_single_lidar.sh` 使用同一
+PTP 检查。回放旧包时可显式给融合节点设置 `require_ptp_sync=false`，保留录制的
+采样时间；该选项仅用于回放。PTP 对齐时钟，双 IMU 采样相位通过有界插值处理。
+
+传感器锁定等待失败时，入口会直接查询 DDS：缺少 `/livox/ptp_locked` 发布者时，
+先确认新版驱动已成功构建到 `livox/install`、加载的工作区和 `ROS_DOMAIN_ID`；
+已有发布者却为 false 时，检查驱动的逐设备时间诊断。仅有四条原始话题不足以证明
+锁定。若从普通复制安装改用 `--symlink-install` 后出现“failed to create symbolic
+link”及“existing path cannot be removed: Is a directory”，需先停止采集、备份并
+清理受影响的包 build/install 后再构建；
+编译失败后单纯重启仍会加载旧版。
+
 ## 高密度建图
 
 建图链路为双 MID360 融合点云与 IMU、DLIO 里程计、Scan Context + GICP

@@ -53,7 +53,7 @@
     odom/imu/calibration/gyro: true
     odom/imu/calibration/accel: true
     # 静态重力对齐时长，单位秒；此配置用于上游双 IMU 标定后的补充对齐。
-    odom/imu/calibration/time: 3
+    odom/imu/calibration/time: 3.0
     # IMU 缓冲区最大样本数。
     odom/imu/bufferSize: 5000
     # 关键帧触发阈值：平移距离单位米，旋转角度单位度。

@@ -679,7 +679,9 @@ class PointLioNode final : public rclcpp::Node {
             column * message->point_step + field->offset;
         float seconds = 0.0F;
         std::memcpy(&seconds, data + offset, sizeof(seconds));
-        if (std::isfinite(seconds) && seconds >= -0.005F && seconds <= 0.25F) {
+        // The later fused header can place the other lidar's first points
+        // up to 30 ms before time zero. Preserve those acquisition times.
+        if (std::isfinite(seconds) && seconds >= -0.05F && seconds <= 0.25F) {
           cloud->points[i].curvature = seconds * 1000.0F;
         } else {
           invalid_point_time = true;

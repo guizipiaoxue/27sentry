@@ -1,0 +1,13 @@
+[Unit]
+Description=Bounded synchronization from system UTC to the %i PTP hardware clock
+Requires=sentry-ptp4l@%i.service sentry-phc-bootstrap@%i.service
+After=sentry-ptp4l@%i.service sentry-phc-bootstrap@%i.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/phc2sys -s CLOCK_REALTIME -c %i -w -z /run/ptp4l-%i -m -q -x --max_frequency=100000 -S 0.0 -F 0.0
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -136,7 +136,11 @@ bool LdsLidar::InitLivoxLidar() {
   std::vector<UserLivoxLidarConfig> user_configs;
   if (!parser.Parse(user_configs)) {
     std::cout << "failed to parse user-defined config" << std::endl;
+    return false;
   }
+  std::vector<uint32_t> expected_handles;
+  for (const auto& config : user_configs) expected_handles.push_back(config.handle);
+  pub_handler().SetExpectedLidars(expected_handles);
 
   // SDK initialization
   if (!LivoxLidarSdkInit(path_.c_str())) {

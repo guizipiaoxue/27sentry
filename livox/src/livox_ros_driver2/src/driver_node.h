@@ -26,6 +26,9 @@
 #define LIVOX_DRIVER_NODE_H
 
 #include "include/ros_headers.h"
+#ifdef BUILDING_ROS2
+#include <std_msgs/msg/bool.hpp>
+#endif
 
 namespace livox_ros {
 
@@ -64,6 +67,9 @@ class DriverNode final : public rclcpp::Node {
  private:
   void PointCloudDataPollThread();
   void ImuDataPollThread();
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr ptp_status_pub_;
+  rclcpp::TimerBase::SharedPtr ptp_status_timer_;
+  bool last_ptp_locked_ = false;
 
   std::unique_ptr<Lddc> lddc_ptr_;
   std::shared_ptr<std::thread> pointclouddata_poll_thread_;

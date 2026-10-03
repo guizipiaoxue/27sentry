@@ -31,7 +31,16 @@
 
 namespace livox_ros {
 
-std::atomic<bool> PubHandler::is_timestamp_sync_;
+namespace {
+uint64_t SteadyNanoseconds() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+uint64_t UtcNanoseconds() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+}
+}  // namespace
 
 PubHandler &pub_handler() {
   static PubHandler handler;
@@ -60,12 +69,11 @@ void PubHandler::Uninit() {
 
 void PubHandler::RequestExit() {
   is_quit_.store(true);
+  packet_condition_.notify_all();
 }
 
 void PubHandler::SetPointCloudConfig(const double publish_freq) {
   publish_interval_ = (kNsPerSecond / (publish_freq * 10)) * 10;
-  publish_interval_tolerance_ = publish_interval_ - kNsTolerantFrameTimeDeviation;
-  publish_interval_ms_ = publish_interval_ / kRatioOfMsToNs;
   if (!point_process_thread_) {
     point_process_thread_ = std::make_shared<std::thread>(&PubHandler::RawDataProcess, this);
   }
@@ -95,27 +103,114 @@ void PubHandler::SetPointCloudsCallback(PointCloudsCallback cb, void* client_dat
   lidar_listen_id_ = LivoxLidarAddPointCloudObserver(OnLivoxLidarPointCloudCallback, this);
 }
 
+void PubHandler::SetTimestampConfig(const TimestampConfig& config) {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  timestamp_guard_.Configure(config);
+}
+
+void PubHandler::SetExpectedLidars(const std::vector<uint32_t>& handles) {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  timestamp_guard_.SetExpectedLidars(handles);
+}
+
+bool PubHandler::IsPtpLocked() {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  return timestamp_guard_.IsPtpLocked(SteadyNanoseconds());
+}
+
+bool PubHandler::IsCurrentGeneration(uint32_t handle, SensorStream stream,
+                                     uint64_t generation) {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  return timestamp_guard_.IsCurrent(handle, stream, generation, SteadyNanoseconds());
+}
+
+bool PubHandler::PublishIfCurrent(uint32_t handle, SensorStream stream,
+                                 uint64_t generation, uint64_t timestamp,
+                                 const std::function<void()>& publish) {
+  // Serialize the final publish with loss/reset so a queued old generation
+  // cannot pass a check and then be published after that generation is lost.
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  if (!timestamp_guard_.IsCurrent(handle, stream, generation, SteadyNanoseconds()) ||
+      !timestamp_guard_.IsFreshUtc(timestamp, UtcNanoseconds())) {
+    return false;
+  }
+  publish();
+  return true;
+}
+
+TimestampResult PubHandler::ValidateTimestamp(
+    uint32_t handle, SensorStream stream, const LivoxLidarEthernetPacket& data) {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  const auto steady_ns = SteadyNanoseconds();
+  const auto result = timestamp_guard_.Accept(
+      handle, stream, data.time_type, data.timestamp, sizeof(data.timestamp),
+      UtcNanoseconds(), steady_ns);
+  if (!result.accepted) {
+    auto& last_warning = timestamp_warning_times_[{handle, stream}];
+    if (last_warning == 0 || steady_ns - last_warning >= 3000000000ULL) {
+      last_warning = steady_ns;
+      std::cerr << "PTP: dropping " << IpNumToString(handle) << " "
+                << (stream == SensorStream::kImu ? "IMU" : "cloud") << ": "
+                << TimestampErrorName(result.error) << " (time_type="
+                << static_cast<unsigned>(data.time_type) << ")" << std::endl;
+    }
+  }
+  return result;
+}
+
+void PubHandler::RejectPacket(uint32_t handle, SensorStream stream) {
+  std::lock_guard<std::mutex> lock(timestamp_mutex_);
+  timestamp_guard_.Invalidate(handle, TimestampError::kInvalidPacket, SteadyNanoseconds());
+  const auto now_ns = SteadyNanoseconds();
+  auto& last_warning = timestamp_warning_times_[{handle, stream}];
+  if (last_warning == 0 || now_ns - last_warning >= 3000000000ULL) {
+    last_warning = now_ns;
+    std::cerr << "PTP: dropping malformed packet from " << IpNumToString(handle)
+              << " " << (stream == SensorStream::kImu ? "IMU" : "cloud")
+              << std::endl;
+  }
+}
+
 void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t dev_type,
                                                 LivoxLidarEthernetPacket *data, void *client_data) {
-  PubHandler* self = (PubHandler*)client_data;
-  if (!self) {
+  PubHandler* self = static_cast<PubHandler*>(client_data);
+  if (!self || !data) return;
+  const bool is_imu = data->data_type == kLivoxLidarImuData;
+  const auto stream = is_imu ? SensorStream::kImu : SensorStream::kCloud;
+  const uint32_t header_size = sizeof(LivoxLidarEthernetPacket) - 1;
+  if (data->length < header_size || (!is_imu && data->dot_num == 0)) {
+    self->RejectPacket(handle, stream);
     return;
   }
-
-  if (data->time_type != kTimestampTypeNoSync) {
-    is_timestamp_sync_.store(true);
-  } else {
-    is_timestamp_sync_.store(false);
+  const uint32_t length = data->length - header_size;
+  std::size_t raw_point_size = 0;
+  switch (data->data_type) {
+    case kLivoxLidarImuData: raw_point_size = sizeof(RawImuPoint); break;
+    case kLivoxLidarCartesianCoordinateHighData:
+      raw_point_size = sizeof(LivoxLidarCartesianHighRawPoint); break;
+    case kLivoxLidarCartesianCoordinateLowData:
+      raw_point_size = sizeof(LivoxLidarCartesianLowRawPoint); break;
+    case kLivoxLidarSphericalCoordinateData:
+      raw_point_size = sizeof(LivoxLidarSpherPoint); break;
+    case kLivoxLidarDoubleEchoData:
+      raw_point_size = sizeof(LivoxLidarDoubleEchoRawPoint); break;
+    default: self->RejectPacket(handle, stream); return;
   }
+  if (length < raw_point_size * (is_imu ? 1U : data->dot_num)) {
+    self->RejectPacket(handle, stream);
+    return;
+  }
+  const auto stamp = self->ValidateTimestamp(handle, stream, *data);
+  if (!stamp.accepted) return;
 
-  if (data->data_type == kLivoxLidarImuData) {
+  if (is_imu) {
     if (self->imu_callback_) {
-      RawImuPoint* imu = (RawImuPoint*) data->data;
-      ImuData imu_data;
+      const auto* imu = reinterpret_cast<const RawImuPoint*>(data->data);
+      ImuData imu_data{};
       imu_data.lidar_type = static_cast<uint8_t>(LidarProtoType::kLivoxLidarType);
       imu_data.handle = handle;
-      imu_data.time_stamp = GetEthPacketTimestamp(data->time_type,
-                                                  data->timestamp, sizeof(data->timestamp));
+      imu_data.time_stamp = stamp.utc_ns;
+      imu_data.generation = stamp.generation;
       imu_data.gyro_x = imu->gyro_x;
       imu_data.gyro_y = imu->gyro_y;
       imu_data.gyro_z = imu->gyro_z;
@@ -126,31 +221,30 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t d
     }
     return;
   }
-  RawPacket packet = {};
+  RawPacket packet{};
   packet.handle = handle;
   packet.lidar_type = LidarProtoType::kLivoxLidarType;
-  packet.extrinsic_enable = false; 
+  packet.extrinsic_enable = false;
   if (dev_type == LivoxLidarDeviceType::kLivoxLidarTypeIndustrialHAP) {
     packet.line_num = kLineNumberHAP;
-  } else if (dev_type == LivoxLidarDeviceType::kLivoxLidarTypeMid360||dev_type==LivoxLidarDeviceType::kLivoxLidarTypeMid360s) {
+  } else if (dev_type == LivoxLidarDeviceType::kLivoxLidarTypeMid360 ||
+             dev_type == LivoxLidarDeviceType::kLivoxLidarTypeMid360s) {
     packet.line_num = kLineNumberMid360;
   } else {
     packet.line_num = kLineNumberDefault;
   }
   packet.data_type = data->data_type;
   packet.point_num = data->dot_num;
-  packet.point_interval = data->time_interval * 100 / data->dot_num;  //ns
-  packet.time_stamp = GetEthPacketTimestamp(data->time_type,
-                                            data->timestamp, sizeof(data->timestamp));
-  uint32_t length = data->length - sizeof(LivoxLidarEthernetPacket) + 1;
+  packet.point_interval = data->time_interval * 100 / data->dot_num;  // ns
+  packet.time_stamp = stamp.utc_ns;
+  packet.timestamp_type = data->time_type;
+  packet.generation = stamp.generation;
   packet.raw_data.insert(packet.raw_data.end(), data->data, data->data + length);
   {
     std::unique_lock<std::mutex> lock(self->packet_mutex_);
-    self->raw_packet_queue_.push_back(packet);
+    self->raw_packet_queue_.push_back(std::move(packet));
   }
-    self->packet_condition_.notify_one();
-
-  return;
+  self->packet_condition_.notify_one();
 }
 
 void PubHandler::PublishPointCloud() {
@@ -161,69 +255,22 @@ void PubHandler::PublishPointCloud() {
   return;
 }
 
-void PubHandler::CheckTimer(uint32_t id) {
-
-  if (PubHandler::is_timestamp_sync_.load()) { // Enable time synchronization
-    auto& process_handler = lidar_process_handlers_[id];
-    uint64_t recent_time_ms = process_handler->GetRecentTimeStamp() / kRatioOfMsToNs;
-    if ((recent_time_ms % publish_interval_ms_ != 0) || recent_time_ms == 0) {
-      return;
-    }
-
-    uint64_t diff = process_handler->GetRecentTimeStamp() - process_handler->GetLidarBaseTime();
-    if (diff < publish_interval_tolerance_) {
-      return;
-    }
-
-    frame_.base_time[frame_.lidar_num] = process_handler->GetLidarBaseTime();
-    points_[id].clear();
-    process_handler->GetLidarPointClouds(points_[id]);
-    if (points_[id].empty()) {
-      return;
-    }
-    PointPacket& lidar_point = frame_.lidar_point[frame_.lidar_num];
-    lidar_point.lidar_type = LidarProtoType::kLivoxLidarType;  // TODO:
-    lidar_point.handle = id;
-    lidar_point.points_num = points_[id].size();
-    lidar_point.points = points_[id].data();
-    frame_.lidar_num++;
-    
-    if (frame_.lidar_num != 0) {
-      PublishPointCloud();
-      frame_.lidar_num = 0;
-    }
-  } else { // Disable time synchronization
-    auto now_time = std::chrono::high_resolution_clock::now();
-    //First Set
-    static bool first = true;
-    if (first) {
-      last_pub_time_ = now_time;
-      first = false;
-      return;
-    }
-    if (now_time - last_pub_time_ < std::chrono::nanoseconds(publish_interval_)) {
-      return;
-    }
-    last_pub_time_ += std::chrono::nanoseconds(publish_interval_);
-    for (auto &process_handler : lidar_process_handlers_) {
-      frame_.base_time[frame_.lidar_num] = process_handler.second->GetLidarBaseTime();
-      uint32_t handle = process_handler.first;
-      points_[handle].clear();
-      process_handler.second->GetLidarPointClouds(points_[handle]);
-      if (points_[handle].empty()) {
-        continue;
-      }
-      PointPacket& lidar_point = frame_.lidar_point[frame_.lidar_num];
-      lidar_point.lidar_type = LidarProtoType::kLivoxLidarType;  // TODO:
-      lidar_point.handle = handle;
-      lidar_point.points_num = points_[handle].size();
-      lidar_point.points = points_[handle].data();
-      frame_.lidar_num++;
-    }
-    PublishPointCloud();
-    frame_.lidar_num = 0;
-  }
-  return;
+void PubHandler::CheckTimer(uint32_t id, const RawPacket& packet) {
+  auto& process_handler = lidar_process_handlers_[id];
+  if (!frame_boundaries_[id].Advance(packet.time_stamp, publish_interval_)) return;
+  frame_.base_time[0] = process_handler->GetLidarBaseTime();
+  points_[id].clear();
+  process_handler->GetLidarPointClouds(points_[id]);
+  if (points_[id].empty()) return;
+  PointPacket& lidar_point = frame_.lidar_point[0];
+  lidar_point.lidar_type = LidarProtoType::kLivoxLidarType;
+  lidar_point.handle = id;
+  lidar_point.generation = packet.generation;
+  lidar_point.points_num = points_[id].size();
+  lidar_point.points = points_[id].data();
+  frame_.lidar_num = 1;
+  PublishPointCloud();
+  frame_.lidar_num = 0;
 }
 
 void PubHandler::RawDataProcess() {
@@ -246,11 +293,21 @@ void PubHandler::RawDataProcess() {
       lidar_process_handlers_[id].reset(new LidarPubHandler());
     }
     auto &process_handler = lidar_process_handlers_[id];
+    if (!IsCurrentGeneration(id, SensorStream::kCloud, raw_data.generation)) {
+      process_handler->ClearPointClouds();
+      continue;
+    }
+    if (processed_generations_[id] != raw_data.generation) {
+      process_handler->ClearPointClouds();
+      frame_boundaries_[id] = FrameBoundary{};
+      processed_generations_[id] = raw_data.generation;
+    }
     if (lidar_extrinsics_.find(id) != lidar_extrinsics_.end()) {
         lidar_process_handlers_[id]->SetLidarsExtParam(lidar_extrinsics_[id]);
     }
+    // Publish the accumulated preceding interval before adding this packet.
+    CheckTimer(id, raw_data);
     process_handler->PointCloudProcess(raw_data);
-    CheckTimer(id);
   }
 }
 
@@ -262,21 +319,14 @@ bool PubHandler::GetLidarId(LidarProtoType lidar_type, uint32_t handle, uint32_t
   return false;
 }
 
-uint64_t PubHandler::GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time_stamp, uint8_t size) {
-  LdsStamp time;
-  memcpy(time.stamp_bytes, time_stamp, size);
-
-  if (timestamp_type == kTimestampTypeGptpOrPtp ||
-      timestamp_type == kTimestampTypeGps) {
-    return time.stamp;
-  }
-
-  return std::chrono::high_resolution_clock::now().time_since_epoch().count();
-}
-
 /*******************************/
 /*  LidarPubHandler Definitions*/
 LidarPubHandler::LidarPubHandler() : is_set_extrinsic_params_(false) {}
+
+void LidarPubHandler::ClearPointClouds() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  points_clouds_.clear();
+}
 
 uint64_t LidarPubHandler::GetLidarBaseTime() {
   if (points_clouds_.empty()) {

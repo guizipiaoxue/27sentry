@@ -25,6 +25,7 @@
 #include "lddc.h"
 #include "comm/ldq.h"
 #include "comm/comm.h"
+#include "comm/pub_handler.h"
 
 #include <inttypes.h>
 #include <iostream>
@@ -207,10 +208,14 @@ void Lddc::PublishPointcloud2(LidarDataQueue *queue, uint8_t index) {
       continue;
     }
 
+    if (!pub_handler().IsCurrentGeneration(pkg.handle, SensorStream::kCloud, pkg.generation)) {
+      continue;
+    }
     PointCloud2 cloud;
     uint64_t timestamp = 0;
     InitPointcloud2Msg(pkg, cloud, timestamp);
-    PublishPointcloud2Data(index, timestamp, cloud);
+    pub_handler().PublishIfCurrent(pkg.handle, SensorStream::kCloud, pkg.generation,
+        timestamp, [&] { PublishPointcloud2Data(index, timestamp, cloud); });
   }
 }
 
@@ -223,10 +228,14 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
       continue;
     }
 
+    if (!pub_handler().IsCurrentGeneration(pkg.handle, SensorStream::kCloud, pkg.generation)) {
+      continue;
+    }
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
     FillPointsToCustomMsg(livox_msg, pkg);
-    PublishCustomPointData(livox_msg, index);
+    pub_handler().PublishIfCurrent(pkg.handle, SensorStream::kCloud, pkg.generation,
+        livox_msg.timebase, [&] { PublishCustomPointData(livox_msg, index); });
   }
 }
 
@@ -254,7 +263,8 @@ void Lddc::PublishPclMsg(LidarDataQueue *queue, uint8_t index) {
     uint64_t timestamp = 0;
     InitPclMsg(pkg, cloud, timestamp);
     FillPointsToPclMsg(pkg, cloud);
-    PublishPclData(index, timestamp, cloud);
+    pub_handler().PublishIfCurrent(pkg.handle, SensorStream::kCloud, pkg.generation,
+        timestamp, [&] { PublishPclData(index, timestamp, cloud); });
   }
   return;
 }
@@ -505,6 +515,10 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
     return;
   }
 
+  if (!pub_handler().IsCurrentGeneration(imu_data.handle, SensorStream::kImu,
+                                         imu_data.generation)) {
+    return;
+  }
   ImuMsg imu_msg;
   uint64_t timestamp;
   InitImuMsg(imu_data, imu_msg, timestamp);
@@ -516,7 +530,8 @@ void Lddc::PublishImuData(LidarImuDataQueue& imu_data_queue, const uint8_t index
 #endif
 
   if (kOutputToRos == output_type_) {
-    publisher_ptr->publish(imu_msg);
+    pub_handler().PublishIfCurrent(imu_data.handle, SensorStream::kImu,
+        imu_data.generation, timestamp, [&] { publisher_ptr->publish(imu_msg); });
   } else {
 #ifdef BUILDING_ROS1
     if (bag_ && enable_imu_bag_) {

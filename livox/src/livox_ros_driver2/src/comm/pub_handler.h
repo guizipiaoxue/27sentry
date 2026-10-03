@@ -37,6 +37,7 @@
 
 #include "livox_lidar_api.h"
 #include "comm/comm.h"
+#include "comm/ptp_time.h"
 
 namespace livox_ros {
 
@@ -52,6 +53,7 @@ class LidarPubHandler {
   uint64_t GetRecentTimeStamp();
   uint32_t GetLidarPointCloudsSize();
   uint64_t GetLidarBaseTime();
+  void ClearPointClouds();
 
  private:
   void LivoxLidarPointCloudProcess(RawPacket & pkt);
@@ -76,7 +78,6 @@ class PubHandler {
  public:
   using PointCloudsCallback = std::function<void(PointFrame*, void *)>;
   using ImuDataCallback = std::function<void(ImuData*, void*)>;
-  using TimePoint = std::chrono::high_resolution_clock::time_point;
 
   PubHandler() {}
 
@@ -90,6 +91,13 @@ class PubHandler {
   void AddLidarsExtParam(LidarExtParameter& extrinsic_params);
   void ClearAllLidarsExtrinsicParams();
   void SetImuDataCallback(ImuDataCallback cb, void* client_data);
+  void SetTimestampConfig(const TimestampConfig& config);
+  void SetExpectedLidars(const std::vector<uint32_t>& handles);
+  bool IsPtpLocked();
+  bool IsCurrentGeneration(uint32_t handle, SensorStream stream, uint64_t generation);
+  bool PublishIfCurrent(uint32_t handle, SensorStream stream, uint64_t generation,
+                        uint64_t timestamp,
+                        const std::function<void()>& publish);
 
  private:
   //thread to process raw data
@@ -100,13 +108,15 @@ class PubHandler {
   std::condition_variable packet_condition_;
 
   //publish callback
-  void CheckTimer(uint32_t id);
+  void CheckTimer(uint32_t id, const RawPacket& packet);
   void PublishPointCloud();
   static void OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t dev_type,
                                              LivoxLidarEthernetPacket *data, void *client_data);
   
   static bool GetLidarId(LidarProtoType lidar_type, uint32_t handle, uint32_t& id);
-  static uint64_t GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time_stamp, uint8_t size);
+  TimestampResult ValidateTimestamp(uint32_t handle, SensorStream stream,
+                                    const LivoxLidarEthernetPacket& data);
+  void RejectPacket(uint32_t handle, SensorStream stream);
 
   PointCloudsCallback points_callback_;
   void* pub_client_data_ = nullptr;
@@ -120,14 +130,15 @@ class PubHandler {
 
   //pub config
   uint64_t publish_interval_ = 100000000; //100 ms
-  uint64_t publish_interval_tolerance_ = 100000000; //100 ms
-  uint64_t publish_interval_ms_ = 100; //100 ms
-  TimePoint last_pub_time_;
 
   std::map<uint32_t, std::unique_ptr<LidarPubHandler>> lidar_process_handlers_;
   std::map<uint32_t, std::vector<PointXyzlt>> points_;
   std::map<uint32_t, LidarExtParameter> lidar_extrinsics_;
-  static std::atomic<bool> is_timestamp_sync_;
+  std::mutex timestamp_mutex_;
+  TimestampGuard timestamp_guard_;
+  std::map<std::pair<uint32_t, SensorStream>, uint64_t> timestamp_warning_times_;
+  std::map<uint32_t, uint64_t> processed_generations_;
+  std::map<uint32_t, FrameBoundary> frame_boundaries_;
   uint16_t lidar_listen_id_ = 0;
 };
 

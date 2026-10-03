@@ -35,6 +35,10 @@ CALIBRATION_FILE="${CALIBRATION_FILE:-${SCRIPT_DIR}/slam/config/lidar_calibratio
 LIDAR3_TOPIC="${LIDAR3_TOPIC:-livox/lidar_192_168_1_3}"
 LIDAR5_TOPIC="${LIDAR5_TOPIC:-livox/lidar_192_168_1_5}"
 
+source "${SCRIPT_DIR}/scripts/ptp_runtime.sh"
+ptp_check_host "${SCRIPT_DIR}" "${LIVOX_CONFIG:-${SCRIPT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
+ptp_wait_sensors
+
 ros2 run cali_ws pcl_publish \
   --ros-args \
   -p "calibration_file:=${CALIBRATION_FILE}" \

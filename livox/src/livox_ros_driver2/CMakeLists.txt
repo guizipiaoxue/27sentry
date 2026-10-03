@@ -223,6 +223,7 @@ else(ROS_EDITION STREQUAL "ROS2")
   # find_package(<dependency> REQUIRED)
   find_package(ament_cmake_auto REQUIRED)
   ament_auto_find_build_dependencies()
+  find_package(rcl_interfaces REQUIRED)
   find_package(PCL REQUIRED)
   find_package(std_msgs REQUIRED)
   find_package(builtin_interfaces REQUIRED)
@@ -298,6 +299,7 @@ else(ROS_EDITION STREQUAL "ROS2")
     src/call_back/livox_lidar_callback.cpp
   )
 
+  ament_target_dependencies(${PROJECT_NAME} rcl_interfaces)
   target_include_directories(${PROJECT_NAME} PRIVATE ${livox_sdk_INCLUDE_DIRS})
 
   # get include directories of custom msg headers

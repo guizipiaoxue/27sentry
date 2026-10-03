@@ -2,6 +2,9 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.parameter_descriptions import ParameterValue
 import launch
 
 ################### user configure parameters for ros2 start ###################
@@ -28,7 +31,16 @@ livox_ros2_params = [
     {"frame_id": frame_id},
     {"lvx_file_path": lvx_file_path},
     {"user_config_path": user_config_path},
-    {"cmdline_input_bd_code": cmdline_bd_code}
+    {"cmdline_input_bd_code": cmdline_bd_code},
+    {"use_sim_time": False},
+    {"require_ptp_sync": ParameterValue(
+        LaunchConfiguration("require_ptp_sync"), value_type=bool)},
+    {"ptp_utc_offset_seconds": ParameterValue(
+        LaunchConfiguration("ptp_utc_offset_seconds"), value_type=int)},
+    {"ptp_max_host_skew_seconds": ParameterValue(
+        LaunchConfiguration("ptp_max_host_skew_seconds"), value_type=float)},
+    {"ptp_stream_timeout_seconds": ParameterValue(
+        LaunchConfiguration("ptp_stream_timeout_seconds"), value_type=float)}
 ]
 
 
@@ -42,6 +54,11 @@ def generate_launch_description():
         )
 
     return LaunchDescription([
+        DeclareLaunchArgument("require_ptp_sync", default_value="true"),
+        # PHC PTP on this robot uses TAI; software PTP with a UTC source uses 0.
+        DeclareLaunchArgument("ptp_utc_offset_seconds", default_value="37"),
+        DeclareLaunchArgument("ptp_max_host_skew_seconds", default_value="2.0"),
+        DeclareLaunchArgument("ptp_stream_timeout_seconds", default_value="0.5"),
         livox_driver,
         # launch.actions.RegisterEventHandler(
         #     event_handler=launch.event_handlers.OnProcessExit(

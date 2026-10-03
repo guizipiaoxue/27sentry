@@ -15,9 +15,12 @@ set -u
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 # MID360 3 号雷达配置
-LIVOX_CONFIG="${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json"
+LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
 POINT_TOPIC="livox/lidar_192_168_1_3"
 IMU_TOPIC="livox/imu_192_168_1_3"
+
+source "${ROOT_DIR}/scripts/ptp_runtime.sh"
+ptp_check_host "${ROOT_DIR}" "${LIVOX_CONFIG}"
 
 ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
   -p xfer_format:=0 \
@@ -26,15 +29,21 @@ ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
   -p publish_freq:=10.0 \
   -p output_data_type:=0 \
   -p frame_id:=livox_frame \
+  -p require_ptp_sync:=true \
+  -p "ptp_utc_offset_seconds:=${PTP_UTC_OFFSET}" \
+  -p use_sim_time:=false \
   -p user_config_path:="${LIVOX_CONFIG}" \
   -p cmdline_input_bd_code:=livox0000000001 &
 
 LIVOX_PID=$!
 trap 'kill "${LIVOX_PID}" 2>/dev/null || true' EXIT INT TERM
 sleep 2
+ptp_wait_sensors
 
 ros2 run single_test single_lidar_odom --ros-args \
   --params-file "${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/dlio.yaml" \
   --params-file "${ROOT_DIR}/odom/src/direct_lidar_inertial_odometry/cfg/params.yaml" \
+  -p odom/computeTimeOffset:=false \
+  -p use_sim_time:=false \
   -r "pointcloud:=${POINT_TOPIC}" \
   -r "imu:=${IMU_TOPIC}"

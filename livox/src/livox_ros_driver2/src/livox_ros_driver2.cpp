@@ -33,6 +33,10 @@
 #include "driver_node.h"
 #include "lddc.h"
 #include "lds_lidar.h"
+#include "comm/pub_handler.h"
+#ifdef BUILDING_ROS2
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#endif
 
 using namespace livox_ros;
 
@@ -78,6 +82,15 @@ int main(int argc, char **argv) {
   } else {
     publish_freq = publish_freq;
   }
+
+  TimestampConfig timestamp_config;
+  livox_node.param("require_ptp_sync", timestamp_config.require_ptp_sync, true);
+  int ptp_utc_offset_seconds = 37;
+  livox_node.param("ptp_utc_offset_seconds", ptp_utc_offset_seconds, 37);
+  timestamp_config.ptp_utc_offset_seconds = ptp_utc_offset_seconds;
+  livox_node.param("ptp_max_host_skew_seconds", timestamp_config.ptp_max_host_skew_seconds, 2.0);
+  livox_node.param("ptp_stream_timeout_seconds", timestamp_config.ptp_stream_timeout_seconds, 0.5);
+  pub_handler().SetTimestampConfig(timestamp_config);
 
   livox_node.future_ = livox_node.exit_signal_.get_future();
 
@@ -152,6 +165,47 @@ DriverNode::DriverNode(const rclcpp::NodeOptions & node_options)
   } else {
     publish_freq = publish_freq;
   }
+
+  rcl_interfaces::msg::ParameterDescriptor timestamp_descriptor;
+  timestamp_descriptor.read_only = true;
+  timestamp_descriptor.description = "PTP timestamp policy; set only at node startup";
+  TimestampConfig timestamp_config;
+  timestamp_config.require_ptp_sync =
+      declare_parameter<bool>("require_ptp_sync", true, timestamp_descriptor);
+  timestamp_config.ptp_utc_offset_seconds =
+      declare_parameter<int64_t>("ptp_utc_offset_seconds", 37, timestamp_descriptor);
+  timestamp_config.ptp_max_host_skew_seconds =
+      declare_parameter<double>("ptp_max_host_skew_seconds", 2.0, timestamp_descriptor);
+  timestamp_config.ptp_stream_timeout_seconds =
+      declare_parameter<double>("ptp_stream_timeout_seconds", 0.5, timestamp_descriptor);
+  if (timestamp_config.require_ptp_sync &&
+      get_parameter("use_sim_time").as_bool()) {
+    throw std::invalid_argument("require_ptp_sync=true requires use_sim_time=false");
+  }
+  pub_handler().SetTimestampConfig(timestamp_config);
+  ptp_status_pub_ = create_publisher<std_msgs::msg::Bool>(
+      "/livox/ptp_locked", rclcpp::QoS(1).reliable().transient_local());
+  std_msgs::msg::Bool initial_ptp_status;
+  initial_ptp_status.data = false;
+  ptp_status_pub_->publish(initial_ptp_status);
+  ptp_status_timer_ = create_wall_timer(std::chrono::milliseconds(500), [this] {
+    std_msgs::msg::Bool status;
+    status.data = pub_handler().IsPtpLocked();
+    ptp_status_pub_->publish(status);
+    if (status.data != last_ptp_locked_) {
+      if (status.data) {
+        DRIVER_INFO(*this, "PTP locked: every configured LiDAR cloud/IMU stream is fresh");
+      } else {
+        DRIVER_ERROR(*this, "PTP lost: stopping old generations; waiting for all configured streams");
+      }
+      last_ptp_locked_ = status.data;
+    }
+  });
+  DRIVER_INFO(*this, "PTP timestamp policy: required=%s, UTC offset=%lld s, host skew=%.3f s, stream timeout=%.3f s",
+      timestamp_config.require_ptp_sync ? "true" : "false",
+      static_cast<long long>(timestamp_config.ptp_utc_offset_seconds),
+      timestamp_config.ptp_max_host_skew_seconds,
+      timestamp_config.ptp_stream_timeout_seconds);
 
   future_ = exit_signal_.get_future();
 

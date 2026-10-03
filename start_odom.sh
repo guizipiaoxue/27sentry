@@ -18,7 +18,8 @@ Options:
   -h, --help                 Show this help message
 
 Environment defaults: ODOM_ALGORITHM=dlio|plio, RECORD_ROSBAG=0|1,
-ROSBAG_OUTPUT=/path/to/bag.
+ROSBAG_OUTPUT=/path/to/bag, PTP_UTC_OFFSET=37 (TAI) or 0 (UTC),
+PTP_CHECK_TIMEOUT=30, PTP_LOCK_TIMEOUT=30. PTP must be running before startup.
 EOF
 }
 
@@ -308,6 +309,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+source "${ROOT_DIR}/scripts/ptp_runtime.sh"
+ptp_check_host "${ROOT_DIR}" "${LIVOX_CONFIG}"
+
 DRIVER_ARGS=(
   ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args
   -p xfer_format:=1
@@ -316,6 +320,9 @@ DRIVER_ARGS=(
   -p publish_freq:=10.0
   -p output_data_type:=0
   -p frame_id:=livox_frame
+  -p require_ptp_sync:=true
+  -p "ptp_utc_offset_seconds:=${PTP_UTC_OFFSET}"
+  -p use_sim_time:=false
   -p user_config_path:="${LIVOX_CONFIG}"
   -r "/livox/lidar_192_168_1_5:=${RAW_LIDAR5_TOPIC}"
   -r "/livox/lidar_192_168_1_3:=${RAW_LIDAR3_TOPIC}"
@@ -345,6 +352,7 @@ if [[ "${RECORD_ROSBAG}" == "1" ]]; then
     /gimbal/cloud_fused
     /gimbal/imu_fused
     /gimbal/imu_calibrated
+    /livox/ptp_locked
     /point_lio/odom
     /dlio/odom_node/odom
     /path
@@ -370,8 +378,12 @@ if [[ "${RECORD_ROSBAG}" == "1" ]]; then
   fi
 fi
 
+ptp_wait_sensors
+
 echo "[start_odom] Starting point-cloud and IMU fusion..."
 setsid ros2 run fusion_ws fusion_pcl --ros-args \
+  -p require_ptp_sync:=true \
+  -p use_sim_time:=false \
   -p imu_accel_unit:=auto \
   -p "lidar5_calibration:=${ROOT_DIR}/slam/config/gimbal_lidar_5.yaml" \
   -p "lidar3_calibration:=${ROOT_DIR}/slam/config/gimbal_lidar_3.yaml" \
@@ -447,6 +459,7 @@ if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
     -p imu/calibration:=true \
     -p pointcloud/deskew:=true \
     -p odom/computeTimeOffset:=false \
+    -p use_sim_time:=false \
     -p publish/pose_odom:=true \
     -p publish/keyframes:=true \
     -p frames/odom:=odom \
@@ -456,6 +469,7 @@ if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
 else
   setsid ros2 run plio point_lio --ros-args \
     --params-file "${ODOM_PARAMS}" \
+    -p use_sim_time:=false \
     -r pointcloud:=/gimbal/cloud_fused \
     -r imu:=/gimbal/imu_fused \
     -r odom:=/point_lio/odom \

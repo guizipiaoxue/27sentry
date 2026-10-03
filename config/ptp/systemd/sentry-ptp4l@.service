@@ -1,0 +1,13 @@
+[Unit]
+Description=Sentry PTP grandmaster on %i
+Requires=sentry-phc-bootstrap@%i.service
+After=network.target sentry-phc-bootstrap@%i.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ptp4l -f /etc/linuxptp/sentry/master-%i.conf -i %i -m
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

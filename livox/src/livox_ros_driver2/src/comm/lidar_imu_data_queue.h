@@ -51,6 +51,7 @@ typedef struct {
   //   uint8_t slot;
   // };
   uint64_t time_stamp;
+  uint64_t generation;
   float gyro_x;        /**< Gyroscope X axis, Unit:rad/s */
   float gyro_y;        /**< Gyroscope Y axis, Unit:rad/s */
   float gyro_z;        /**< Gyroscope Z axis, Unit:rad/s */
@@ -74,4 +75,3 @@ class LidarImuDataQueue {
 } // namespace
 
 #endif // LIVOX_ROS_DRIVER_LIDAR_IMU_DATA_QUEUE_H_
-

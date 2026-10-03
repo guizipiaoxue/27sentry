@@ -13,7 +13,6 @@
       "log_data_ip": "", "log_data_port": 56501
     }
   },
-  "timesync_config": {"enable_timesync": true, "device_name": "", "protocol": 1},
   "lidar_configs": [
     {
       "ip": "192.168.1.5", "pcl_data_type": 1, "pattern_mode": 0,

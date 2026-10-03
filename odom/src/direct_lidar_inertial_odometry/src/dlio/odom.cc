@@ -585,7 +585,9 @@ void dlio::OdomNode::getScanFromROS(const sensor_msgs::msg::PointCloud2::SharedP
         std::memcpy(&p.timestamp, data + timing->offset, timing->datatype == 8 ? 8 : 4);
         const double t = sensor == dlio::SensorType::VELODYNE ? p.time :
             (sensor == dlio::SensorType::OUSTER ? p.t * 1e-9 : p.timestamp);
-        if (!std::isfinite(t) || (sensor == dlio::SensorType::VELODYNE && (t < -.005 || t > .25))) {
+        // Fusion uses the later lidar header. Its 30 ms pairing tolerance
+        // permits earlier points to have negative relative acquisition times.
+        if (!std::isfinite(t) || (sensor == dlio::SensorType::VELODYNE && (t < -.05 || t > .25))) {
           RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Invalid point time: fused time must be seconds relative to the scan header");
           return;
         }

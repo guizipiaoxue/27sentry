@@ -17,6 +17,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -26,11 +27,14 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <yaml-cpp/yaml.h>
+
+#include "time_guard.hpp"
 
 struct EIGEN_ALIGN16 TimedPoint {
   PCL_ADD_POINT4D;
@@ -67,6 +71,19 @@ class FusionPcl final : public rclcpp::Node {
     imu_output_topic_ = declare_parameter<std::string>(
         "imu_output_topic", "/gimbal/imu_fused");
     frame_id_ = declare_parameter<std::string>("frame_id", "gimbal");
+    rcl_interfaces::msg::ParameterDescriptor ptp_descriptor;
+    ptp_descriptor.read_only = true;
+    ptp_descriptor.description = "PTP timing policy configured at startup";
+    require_ptp_sync_ = declare_parameter<bool>(
+        "require_ptp_sync", true, ptp_descriptor);
+    time_guard_ = std::make_unique<fusion_timing::TimeGuard>(
+        require_ptp_sync_,
+        declare_parameter<double>("ptp_max_host_skew_seconds", 2.0, ptp_descriptor));
+    if (require_ptp_sync_ && get_parameter("use_sim_time").as_bool()) {
+      throw std::runtime_error(
+          "PTP live fusion requires use_sim_time=false; replay must explicitly "
+          "set require_ptp_sync=false");
+    }
     cloud_sync_tolerance_ = declare_parameter<double>(
         "cloud_sync_tolerance", 0.03);
     imu_interpolation_max_gap_ = declare_parameter<double>(
@@ -124,6 +141,20 @@ class FusionPcl final : public rclcpp::Node {
     initial_status.data = false;
     calibration_pub_->publish(initial_status);
 
+    ptp_status_sub_ = create_subscription<std_msgs::msg::Bool>(
+        "/livox/ptp_locked",
+        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
+        [this](std_msgs::msg::Bool::ConstSharedPtr status) {
+          time_guard_->updateLock(status->data,
+                                 fusion_timing::TimeGuard::Clock::now());
+          if (require_ptp_sync_ && !status->data) {
+            invalidateTiming("driver reports PTP unlocked", true);
+          }
+        });
+    ptp_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
+      ensureTimingReady();
+    });
+
     for (std::size_t i = 0; i < 2; ++i) {
       cloud_subs_[i] = create_subscription<CustomMsg>(
           cloud_topics_[i], qos,
@@ -154,6 +185,8 @@ class FusionPcl final : public rclcpp::Node {
     RCLCPP_INFO(
         get_logger(), "configured raw IMU acceleration unit: %s",
         imu_accel_unit_.c_str());
+    RCLCPP_INFO(get_logger(), "PTP live timing checks: %s",
+                require_ptp_sync_ ? "required" : "disabled for explicit replay");
   }
 
  private:
@@ -255,7 +288,63 @@ class FusionPcl final : public rclcpp::Node {
     }
   }
 
+  void invalidateTiming(const std::string &reason, bool reset_timeline = false) {
+    for (auto &queue : cloud_queues_) queue.clear();
+    for (auto &queue : imu_queues_) queue.clear();
+    for (std::size_t index = 0; index < calibrations_.size(); ++index) {
+      resetCalibration(index);
+    }
+    imu_calibration_complete_ = false;
+    // A malformed/backward packet must not lower the high-water mark. Only
+    // a real loss of PTP lock starts a new acquisition-clock generation.
+    if (reset_timeline) time_guard_->resetTimeline();
+    if (timing_active_) {
+      std_msgs::msg::Bool status;
+      status.data = false;
+      calibration_pub_->publish(status);
+    }
+    timing_active_ = false;
+    const auto current = fusion_timing::TimeGuard::Clock::now();
+    const auto previous = rejection_logs_.find(reason);
+    if (previous == rejection_logs_.end() ||
+        current - previous->second >= std::chrono::seconds(2)) {
+      RCLCPP_WARN(get_logger(),
+                  "sensor timing rejected: %s; queues and IMU calibration reset",
+                  reason.c_str());
+      rejection_logs_[reason] = current;
+    }
+  }
+
+  bool ensureTimingReady() {
+    const std::string reason =
+        time_guard_->readiness(fusion_timing::TimeGuard::Clock::now());
+    if (!reason.empty()) {
+      invalidateTiming(reason, true);
+      return false;
+    }
+    timing_active_ = true;
+    return true;
+  }
+
+  bool validateTiming(std::size_t stream,
+                      const builtin_interfaces::msg::Time &stamp,
+                      const std::uint64_t *timebase = nullptr) {
+    if (!ensureTimingReady()) return false;
+    const std::int64_t host_stamp =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::string reason = time_guard_->validate(
+        stream, stamp.sec, stamp.nanosec, host_stamp, timebase);
+    if (!reason.empty()) {
+      const std::string label = stream < 2 ? "lidar" : "IMU";
+      invalidateTiming(label + (stream % 2 == 0 ? "5: " : "3: ") + reason);
+      return false;
+    }
+    return true;
+  }
+
   void cloudCallback(std::size_t index, CustomMsg::ConstSharedPtr message) {
+    if (!validateTiming(index, message->header.stamp, &message->timebase)) return;
     ++cloud_received_[index];
     cloud_queues_[index].push_back(
         {rclcpp::Time(message->header.stamp), std::move(message)});
@@ -264,6 +353,7 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void synchronizeClouds() {
+    if (!ensureTimingReady()) return;
     while (!cloud_queues_[0].empty() && !cloud_queues_[1].empty()) {
       const double dt =
           (cloud_queues_[0].front().stamp - cloud_queues_[1].front().stamp)
@@ -311,6 +401,8 @@ class FusionPcl final : public rclcpp::Node {
     const auto after_serialize = std::chrono::steady_clock::now();
     output.header.frame_id = frame_id_;
     output.header.stamp = output_stamp;
+    // Large cloud transforms can outlast the status freshness window.
+    if (!ensureTimingReady()) return;
     cloud_pub_->publish(output);
     const auto after_publish = std::chrono::steady_clock::now();
 
@@ -342,6 +434,7 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void imuCallback(std::size_t index, Imu::ConstSharedPtr message) {
+    if (!validateTiming(2 + index, message->header.stamp)) return;
     if (!calibrations_[index].complete) {
       calibrateImu(index, *message);
       return;
@@ -471,6 +564,7 @@ class FusionPcl final : public rclcpp::Node {
   }
 
   void synchronizeImus() {
+    if (!ensureTimingReady()) return;
     // Two independent 200 Hz MID360 IMUs normally have a sampling phase
     // difference of several milliseconds. Keep lidar5 as the output clock and
     // interpolate lidar3 instead of requiring two samples to have nearly equal
@@ -510,10 +604,10 @@ class FusionPcl final : public rclcpp::Node {
       }
 
       const double alpha = (target - before.stamp).seconds() / interval;
-      publishInterpolatedImu(
-          imu_queues_[0].front(), before, after,
-          std::clamp(alpha, 0.0, 1.0));
+      auto imu5 = std::move(imu_queues_[0].front());
       imu_queues_[0].pop_front();
+      publishInterpolatedImu(
+          imu5, before, after, std::clamp(alpha, 0.0, 1.0));
     }
   }
 
@@ -572,6 +666,7 @@ class FusionPcl final : public rclcpp::Node {
     output.linear_acceleration.x = accel.x();
     output.linear_acceleration.y = accel.y();
     output.linear_acceleration.z = accel.z();
+    if (!ensureTimingReady()) return;
     imu_pub_->publish(output);
   }
 
@@ -591,6 +686,11 @@ class FusionPcl final : public rclcpp::Node {
   double max_accel_stddev_ = 0.30;
   double max_gravity_error_ = 0.75;
   bool imu_calibration_complete_ = false;
+  bool require_ptp_sync_ = true;
+  bool timing_active_ = false;
+  std::unique_ptr<fusion_timing::TimeGuard> time_guard_;
+  std::unordered_map<std::string, fusion_timing::TimeGuard::Clock::time_point>
+      rejection_logs_;
   std::size_t max_queue_size_ = 100;
   std::array<Eigen::Matrix4d, 2> transforms_ = {
       Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity()};
@@ -611,6 +711,8 @@ class FusionPcl final : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr calibration_pub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ptp_status_sub_;
+  rclcpp::TimerBase::SharedPtr ptp_timer_;
 };
 
 int main(int argc, char **argv) {

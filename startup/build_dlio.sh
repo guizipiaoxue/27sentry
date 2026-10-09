@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
   ""|--start) ;;
   -h|--help)
-    echo 'Usage: bash build_dlio.sh [--start [start_odom.sh options]]'
+    echo 'Usage: bash startup/build_dlio.sh [--start [start_odom.sh options]]'
     echo 'Build/test DLIO and fusion; --start reuses SDK discovery and rosbag recording.'
     exit 0 ;;
   *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -38,5 +38,5 @@ export MAKEFLAGS="${MAKEFLAGS:--j2}"
 echo 'DLIO and fusion built; motion regression tests passed.'
 if [[ "${1:-}" == --start ]]; then
   shift
-  exec bash "${ROOT_DIR}/start_odom.sh" -a dlio "$@"
+  exec bash "${ROOT_DIR}/startup/start_odom.sh" -a dlio "$@"
 fi

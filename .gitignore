@@ -15,3 +15,4 @@ tools/
 scripts/
 !route/src/generate_map/scripts/
 !route/src/generate_map/scripts/*.py
+docs/

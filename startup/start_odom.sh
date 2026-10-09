@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${SCRIPT_DIR}"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: ./start_odom.sh [OPTIONS]
+Usage: ./startup/start_odom.sh [OPTIONS]
 
 Start the dual-Livox, dual-IMU fusion pipeline with the selected odometry.
 

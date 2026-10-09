@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${SCRIPT_DIR}"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: ./rotate_cali.sh [OPTIONS]
+Usage: ./startup/rotate_cali.sh [OPTIONS]
 
 Calibrate both MID360-to-gimbal rotations from two independent DLIO yaw
 trajectories. The configured XY translations are treated as known mounting
@@ -26,7 +26,7 @@ Useful environment variables:
   PTP_UTC_OFFSET=37 (TAI) or 0 (UTC), PTP_CHECK_TIMEOUT, PTP_LOCK_TIMEOUT
 
 Live use needs no arguments:
-  ./rotate_cali.sh
+  ./startup/rotate_cali.sh
 EOF
 }
 

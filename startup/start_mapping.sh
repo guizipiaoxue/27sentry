@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${SCRIPT_DIR}"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
 # Select the same algorithm for the mapper input and the odometry pipeline.
@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --algorithm=*) ODOM_ALGORITHM="${1#*=}"; shift ;;
-    -h|--help) exec "${ROOT_DIR}/start_odom.sh" --help ;;
+    -h|--help) exec "${SCRIPT_DIR}/start_odom.sh" --help ;;
     --) break ;;
     *) shift ;;
   esac
@@ -222,7 +222,7 @@ if [[ "${ENABLE_GTSAM}" == "1" ]]; then
 else
   echo "[start_mapping] Starting ${ODOM_NAME} pipeline without GTSAM..."
 fi
-setsid "${ROOT_DIR}/start_odom.sh" --algorithm "${ODOM_ALGORITHM}" "${ODOM_ARGS[@]}" &
+setsid "${SCRIPT_DIR}/start_odom.sh" --algorithm "${ODOM_ALGORITHM}" "${ODOM_ARGS[@]}" &
 PIPELINE_PID=$!
 
 supervisor_watchdog "$$" "${MAP_PID}" "${PIPELINE_PID}" &

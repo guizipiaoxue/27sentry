@@ -1,9 +1,9 @@
 # Dual MID360 DLIO
 
-Use `bash build_dlio.sh --start` from the repository root to build the updated
+Use `bash startup/build_dlio.sh --start` from the repository root to build the updated
 DLIO/fusion nodes, run the motion regression test, and launch the existing
 SDK-aware pipeline with diagnostic rosbag recording. After building,
-`bash start_odom.sh -a dlio` starts it directly.
+`bash startup/start_odom.sh -a dlio` starts it directly.
 
 The fused input cloud has float32 `time` in seconds relative to its header.
 DLIO now deskews it before the 0.25 m voxel filter, caps tracking at 4000 points,

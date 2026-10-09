@@ -25,7 +25,7 @@ The executable publishes `/point_lio/odom`, `/path`, `/cloud_registered`,
 stationary while `fusion_ws` performs its startup IMU calibration. The default
 launch also starts the shared Scan Context/GICP loop detector and GTSAM iSAM2
 backend, which publish `/loop_closure/constraint`, `/mapping/optimized_path`,
-and `map -> odom`. Use `ENABLE_GTSAM=0 bash start_odom.sh -a plio` to run only
+and `map -> odom`. Use `ENABLE_GTSAM=0 bash startup/start_odom.sh -a plio` to run only
 the continuous odometry pipeline.
 
 Keyframes use the same `loop_closure/Keyframe` message as DLIO: increasing ID,
@@ -54,8 +54,8 @@ backend prints separate keyframe-update and accepted-loop-update timings.
 For a controlled comparison, run the same rosbag or route twice:
 
 ```bash
-ENABLE_GTSAM=0 bash start_odom.sh -a plio --no-record-bag
-ENABLE_GTSAM=1 bash start_odom.sh -a plio --no-record-bag
+ENABLE_GTSAM=0 bash startup/start_odom.sh -a plio --no-record-bag
+ENABLE_GTSAM=1 bash startup/start_odom.sh -a plio --no-record-bag
 pidstat -urd -p "$(pgrep -f 'point_lio|loop_detector|pose_graph_backend' | paste -sd, -)" 1
 ros2 topic hz /point_lio/keyframe
 ros2 topic hz /loop_closure/constraint
@@ -68,9 +68,9 @@ contention shows up as increased Point-LIO computation time, lower LiDAR rate,
 or queue drops. Keyframe clouds and the graph are retained in memory, so the
 long-run memory trend should also be monitored with `pidstat -r` or `top`.
 
-From the repository root, `bash build_plio.sh --start` rebuilds the fusion and
+From the repository root, `bash startup/build_plio.sh --start` rebuilds the fusion and
 PLIO packages in Release mode, runs the focused regression tests, and starts
-`start_odom.sh -a plio` with its SDK discovery and rosbag recording. Without
+`startup/start_odom.sh -a plio` with its SDK discovery and rosbag recording. Without
 `--start`, it only builds/tests and requires no connected lidar.
 
 The MID360 input contract is float32 `time` in **seconds** relative to the

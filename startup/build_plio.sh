@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Rebuild both affected packages so an old installed fusion cannot zero times.
 set -Eeuo pipefail
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
   ""|--start) ;;
   -h|--help)
-    echo "Usage: bash build_plio.sh [--start [start_odom.sh options]]"
+    echo "Usage: bash startup/build_plio.sh [--start [start_odom.sh options]]"
     echo "--start reuses start_odom.sh SDK discovery and diagnostic rosbag recording."
     exit 0 ;;
   *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -39,5 +39,5 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 echo "PLIO and fusion built; validated calibration installed."
 if [[ "${1:-}" == --start ]]; then
   shift
-  exec bash "${ROOT_DIR}/start_odom.sh" -a plio "$@"
+  exec bash "${ROOT_DIR}/startup/start_odom.sh" -a plio "$@"
 fi

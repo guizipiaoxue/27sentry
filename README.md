@@ -2,7 +2,7 @@
 
 作者：彭友
 
-项目结构、构建顺序和数据时间戳约定见 [AGENT.md](AGENT.md)。
+项目结构、构建顺序和数据时间戳约定见 [AGENTS.md](AGENTS.md)。
 
 ## PTP 时间对齐
 
@@ -32,13 +32,13 @@ PHC 已与 UTC + 37 秒匹配时 bootstrap 不 step；有实机采集进程且 P
 
 ```bash
 # PTP 服务已运行时，启动入口会先检查主机及四路传感器锁定。
-./start_odom.sh  # 默认 PLIO；可用 --algorithm dlio 切换。
+./startup/start_odom.sh  # 默认 PLIO；可用 --algorithm dlio 切换。
 
 # 在另一终端 source ROS 2 与 livox/install/setup.bash 后检查采样时间。
 python3 scripts/check_sensor_time.py --duration 10 --include-fused
 ```
 
-`start_mapping.sh`、实机 `rotate_cali.sh` 和 `odom/start_single_lidar.sh` 使用同一
+`startup/start_mapping.sh`、实机 `startup/rotate_cali.sh` 和 `startup/start_single_lidar.sh` 使用同一
 PTP 检查。回放旧包时可显式给融合节点设置 `require_ptp_sync=false`，保留录制的
 采样时间；该选项仅用于回放。PTP 对齐时钟，双 IMU 采样相位通过有界插值处理。
 
@@ -74,7 +74,7 @@ SDK 内置 spdlog 1.3，ROS Humble 使用系统 spdlog 1.9；直接打开普通 
 
 ```bash
 sudo bash scripts/expand_udp_buffers.sh
-bash start_odom.sh -a plio
+bash startup/start_odom.sh -a plio
 ```
 
 扩容脚本将 `net.core.rmem_max` 持久化为 Linux `SO_RCVBUF` 请求的最大可用值
@@ -83,7 +83,7 @@ bash start_odom.sh -a plio
 不增加所有 socket 的默认缓冲，不预分配 1 GiB；已打开的 socket 须在下次启动采集时
 重新创建。脚本需要 root，验证失败会恢复旧配置。它不重启 PTP 或调整时钟。
 
-`start_odom.sh` 每次建立 `runlog/YYYYMMDD_HHMMSS_算法_PID/`，启动时显示完整路径。
+`startup/start_odom.sh` 每次建立 `runlog/YYYYMMDD_HHMMSS_算法_PID/`，启动时显示完整路径。
 `SENTRY_RUNLOG_DIR` 是组件共用的精确目录，PLIO 在此入口中自动启用日志；独立启动
 节点仍遵循原有 runlog 配置。目录内保存：
 
@@ -106,10 +106,10 @@ MID360 通过 `SetLivoxLidarInfoCallback` 接收设备主动状态推送，收�
 写入 `lidar_health.log` 并输出控制台；另每 5 秒只读查询内部信息，首次延迟 5 秒，
 不改采集或 PTP 配置。`LIDAR_PUSH` 保存 SDK 提供的完整 JSON，未知字段也保留；
 非法推送单独记录 `LIDAR_PUSH_INVALID`。已有进程需在下次正常启动时加载新构建。
-`start_odom.sh` 自动使用共用会话目录；独立运行驱动且未设 `SENTRY_RUNLOG_DIR` 时，
+`startup/start_odom.sh` 自动使用共用会话目录；独立运行驱动且未设 `SENTRY_RUNLOG_DIR` 时，
 健康日志保存到当前目录下 `runlog/YYYYMMDD_HHMMSS/lidar_health.log`，启动会输出
 `LIDAR_HEALTH_LOG file=...`。SDK 内部错误没有统一的用户错误回调，因此保留 SDK
-控制台日志，由 `start_odom.sh` 的 `console.log` 捕获 socket、发送、解包和初始化错误；
+控制台日志，由 `startup/start_odom.sh` 的 `console.log` 捕获 socket、发送、解包和初始化错误；
 独立运行时可用 `tee` 保存 stdout/stderr。
 `core_temp_raw` 是 SDK 的原始 `int32_t`，官方协议单位为 0.01 ℃；
 `core_temp_c=core_temp_raw/100.0` 是内部核心温度，不能当作环境温度。
@@ -221,10 +221,10 @@ colcon build --symlink-install \
 启动完整建图：
 
 ```bash
-./start_mapping.sh
+./startup/start_mapping.sh
 ```
 
-`start_mapping.sh` 和 `start_odom.sh` 默认使用 PLIO，可通过 `--algorithm dlio`
+`startup/start_mapping.sh` 和 `startup/start_odom.sh` 默认使用 PLIO，可通过 `--algorithm dlio`
 或 `ODOM_ALGORITHM=dlio` 显式切换。PLIO 在 `/point_lio/keyframe_cloud` 发布
 `PointCloud2` 关键帧点云供 KD-tree 建图；`/point_lio/keyframe` 发布包含位姿和
 相同点云的 `Keyframe` 消息供回环及 GTSAM 使用。新增输出需重新构建 `plio` 包。
@@ -253,14 +253,14 @@ ros2 service call /dlio/save_kdtree_map std_srvs/srv/Trigger '{}'
 KD-tree 文件使用所选算法的原始里程计位姿；GTSAM 文件使用回环优化后的关键帧位姿
 重新拼接高密度关键帧。两者都以二进制 PCD 格式保存，不做体素降采样。
 
-使用 `start_mapping.sh` 时按 Ctrl+C 会先保存已有地图，再停止所有节点。默认输出为
+使用 `startup/start_mapping.sh` 时按 Ctrl+C 会先保存已有地图，再停止所有节点。默认输出为
 `maps/dlio_kdtree_map.pcd`（沿用原保存路径和 `/dlio/*` 地图服务名）；启用 GTSAM 时还会输出
 `maps/optimized_map.pcd`。可用 `AUTO_SAVE_MAPS=0` 关闭自动保存。
 
 只需要 PLIO 和 KD-tree 原始地图时，可以关闭 Scan Context++ 和 GTSAM 后端：
 
 ```bash
-ENABLE_GTSAM=0 ./start_mapping.sh
+ENABLE_GTSAM=0 ./startup/start_mapping.sh
 ```
 
 回环检测、iSAM2 噪声和保存路径配置在 `odom/config/loop.yaml`。默认地图保存为

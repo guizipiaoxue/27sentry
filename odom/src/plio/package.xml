@@ -17,6 +17,7 @@
   <depend>rclcpp</depend>
   <depend>rcl_interfaces</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>tf2_ros</depend>
   <exec_depend>fusion_ws</exec_depend>
 

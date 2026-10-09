@@ -26,10 +26,20 @@
 
 #include "livox_lidar_api.h"
 #include <string>
-#include <thread>
 #include <iostream>
 
 namespace livox_ros {
+namespace {
+template <typename Command>
+void Submit(LdsLidar* lidar, uint32_t handle, const char* name, Command command) {
+  const auto status = command();
+  if (lidar) lidar->health_monitor().RecordSubmit(handle, name, status);
+}
+void RecordResult(void* data, uint32_t handle, const char* name, livox_status status,
+                  const LivoxLidarAsyncControlResponse* response) {
+  if (data) static_cast<LdsLidar*>(data)->health_monitor().RecordCommand(handle, name, status, response);
+}
+}  // namespace
 
 void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
                                            const LivoxLidarInfo* info,
@@ -39,6 +49,11 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
     return;
   }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
+  if (!info) {
+    lds_lidar->health_monitor().RecordEvent(handle, "LIDAR_DISCOVERY_INVALID", "reason=null_info");
+    return;
+  }
+  lds_lidar->ObserveLidarHealth(handle, info->dev_type);
 
   LidarDevice* lidar_device = GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
@@ -47,6 +62,7 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
     uint8_t index = 0;
     int8_t ret = lds_lidar->cache_index_.GetFreeIndex(kLivoxLidarType, handle, index);
     if (ret != 0) {
+      lds_lidar->health_monitor().RecordEvent(handle, "LIDAR_CONFIG_DEVICE_MISSING", "reason=no_free_index");
       std::cout << "failed to add lidar device, lidar ip: " << IpNumToString(handle) << std::endl;
       return;
     }
@@ -61,30 +77,30 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
       std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
       if (config.pcl_data_type != -1 ) {
         lidar_device->livox_config.set_bits |= kConfigDataType;
-        SetLivoxLidarPclDataType(handle, static_cast<LivoxLidarPointDataType>(config.pcl_data_type),
-                                LivoxLidarCallback::SetDataTypeCallback, lds_lidar);
+        Submit(lds_lidar, handle, "pcl_data_type", [&] { return SetLivoxLidarPclDataType(handle, static_cast<LivoxLidarPointDataType>(config.pcl_data_type),
+                                LivoxLidarCallback::SetDataTypeCallback, lds_lidar); });
         std::cout << "set pcl data type, handle: " << handle << ", data type: "
                   << static_cast<int32_t>(config.pcl_data_type) << std::endl;
       }
       if (config.pattern_mode != -1) {
         lidar_device->livox_config.set_bits |= kConfigScanPattern;
-        SetLivoxLidarScanPattern(handle, static_cast<LivoxLidarScanPattern>(config.pattern_mode),
-                              LivoxLidarCallback::SetPatternModeCallback, lds_lidar);
+        Submit(lds_lidar, handle, "scan_pattern", [&] { return SetLivoxLidarScanPattern(handle, static_cast<LivoxLidarScanPattern>(config.pattern_mode),
+                              LivoxLidarCallback::SetPatternModeCallback, lds_lidar); });
         std::cout << "set scan pattern, handle: " << handle << ", scan pattern: "
                   << static_cast<int32_t>(config.pattern_mode) << std::endl;
       }
       if (config.blind_spot_set != -1) {
         lidar_device->livox_config.set_bits |= kConfigBlindSpot;
-        SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
-                              LivoxLidarCallback::SetBlindSpotCallback, lds_lidar);
+        Submit(lds_lidar, handle, "blind_spot", [&] { return SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
+                              LivoxLidarCallback::SetBlindSpotCallback, lds_lidar); });
 
         std::cout << "set blind spot, handle: " << handle << ", blind spot distance: "
                   << config.blind_spot_set << std::endl;
       }
       if (config.dual_emit_en != -1) {
         lidar_device->livox_config.set_bits |= kConfigDualEmit;
-        SetLivoxLidarDualEmit(handle, (config.dual_emit_en == 0 ? false : true),
-                              LivoxLidarCallback::SetDualEmitCallback, lds_lidar);
+        Submit(lds_lidar, handle, "dual_emit", [&] { return SetLivoxLidarDualEmit(handle, (config.dual_emit_en == 0 ? false : true),
+                              LivoxLidarCallback::SetDualEmitCallback, lds_lidar); });
         std::cout << "set dual emit mode, handle: " << handle << ", enable dual emit: "
                   << static_cast<int32_t>(config.dual_emit_en) << std::endl;
       }
@@ -102,13 +118,13 @@ void LivoxLidarCallback::LidarInfoChangeCallback(const uint32_t handle,
       config.extrinsic_param.y,
       config.extrinsic_param.z
     };
-    SetLivoxLidarInstallAttitude(config.handle, &attitude,
-                                 LivoxLidarCallback::SetAttitudeCallback, lds_lidar);
+    Submit(lds_lidar, config.handle, "install_attitude", [&] { return SetLivoxLidarInstallAttitude(config.handle, &attitude,
+                                 LivoxLidarCallback::SetAttitudeCallback, lds_lidar); });
   }
 
   std::cout << "begin to change work mode to 'Normal', handle: " << handle << std::endl;
-  SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, WorkModeChangedCallback, nullptr);
-  EnableLivoxLidarImuData(handle, LivoxLidarCallback::EnableLivoxLidarImuDataCallback, lds_lidar);
+  Submit(lds_lidar, handle, "work_mode", [&] { return SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, WorkModeChangedCallback, lds_lidar); });
+  Submit(lds_lidar, handle, "imu_enable", [&] { return EnableLivoxLidarImuData(handle, LivoxLidarCallback::EnableLivoxLidarImuDataCallback, lds_lidar); });
   return;
 }
 
@@ -116,19 +132,21 @@ void LivoxLidarCallback::WorkModeChangedCallback(livox_status status,
                                                  uint32_t handle,
                                                  LivoxLidarAsyncControlResponse *response,
                                                  void *client_data) {
-  if (status != kLivoxLidarStatusSuccess) {
-    std::cout << "failed to change work mode, handle: " << handle << ", try again..."<< std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, WorkModeChangedCallback, nullptr);
+  RecordResult(client_data, handle, "work_mode", status, response);
+  auto* lds_lidar = static_cast<LdsLidar*>(client_data);
+  if (!LidarCommandSucceeded(status, response)) {
+    if (lds_lidar) lds_lidar->health_monitor().RetryAfter([lds_lidar, handle] {
+      Submit(lds_lidar, handle, "work_mode", [&] { return SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, WorkModeChangedCallback, lds_lidar); });
+    });
     return;
   }
-  std::cout << "successfully change work mode, handle: " << handle << std::endl;
   return;
 }
 
 void LivoxLidarCallback::SetDataTypeCallback(livox_status status, uint32_t handle,
                                              LivoxLidarAsyncControlResponse *response,
                                              void *client_data) {
+  RecordResult(client_data, handle, "pcl_data_type", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set data type since no lidar device found, handle: "
@@ -137,7 +155,7 @@ void LivoxLidarCallback::SetDataTypeCallback(livox_status status, uint32_t handl
   }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
 
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
     lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigDataType));
     if (!lidar_device->livox_config.set_bits) {
@@ -147,14 +165,14 @@ void LivoxLidarCallback::SetDataTypeCallback(livox_status status, uint32_t handl
               << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarPclDataType(handle, static_cast<LivoxLidarPointDataType>(config.pcl_data_type),
-                             LivoxLidarCallback::SetDataTypeCallback, client_data);
+    Submit(lds_lidar, handle, "pcl_data_type", [&] { return SetLivoxLidarPclDataType(handle, static_cast<LivoxLidarPointDataType>(config.pcl_data_type),
+                             LivoxLidarCallback::SetDataTypeCallback, client_data); });
     std::cout << "set data type timeout, handle: " << handle
               << ", try again..." << std::endl;
   } else {
     std::cout << "failed to set data type, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
+              << ", return code: " << (response ? int(response->ret_code) : -1)
+              << ", error key: " << (response ? int(response->error_key) : -1) << std::endl;
   }
   return;
 }
@@ -162,6 +180,7 @@ void LivoxLidarCallback::SetDataTypeCallback(livox_status status, uint32_t handl
 void LivoxLidarCallback::SetPatternModeCallback(livox_status status, uint32_t handle,
                                                 LivoxLidarAsyncControlResponse *response,
                                                 void *client_data) {
+  RecordResult(client_data, handle, "scan_pattern", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set pattern mode since no lidar device found, handle: "
@@ -170,7 +189,7 @@ void LivoxLidarCallback::SetPatternModeCallback(livox_status status, uint32_t ha
   }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
 
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
     lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigScanPattern));
     if (!lidar_device->livox_config.set_bits) {
@@ -180,14 +199,14 @@ void LivoxLidarCallback::SetPatternModeCallback(livox_status status, uint32_t ha
               << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarScanPattern(handle, static_cast<LivoxLidarScanPattern>(config.pattern_mode),
-                             LivoxLidarCallback::SetPatternModeCallback, client_data);
+    Submit(lds_lidar, handle, "scan_pattern", [&] { return SetLivoxLidarScanPattern(handle, static_cast<LivoxLidarScanPattern>(config.pattern_mode),
+                             LivoxLidarCallback::SetPatternModeCallback, client_data); });
     std::cout << "set pattern mode timeout, handle: " << handle
               << ", try again..." << std::endl;
   } else {
     std::cout << "failed to set pattern mode, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
+              << ", return code: " << (response ? int(response->ret_code) : -1)
+              << ", error key: " << (response ? int(response->error_key) : -1) << std::endl;
   }
   return;
 }
@@ -195,6 +214,7 @@ void LivoxLidarCallback::SetPatternModeCallback(livox_status status, uint32_t ha
 void LivoxLidarCallback::SetBlindSpotCallback(livox_status status, uint32_t handle,
                                               LivoxLidarAsyncControlResponse *response,
                                               void *client_data) {
+  RecordResult(client_data, handle, "blind_spot", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set blind spot since no lidar device found, handle: "
@@ -203,7 +223,7 @@ void LivoxLidarCallback::SetBlindSpotCallback(livox_status status, uint32_t hand
   }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
 
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
     lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigBlindSpot));
     if (!lidar_device->livox_config.set_bits) {
@@ -213,14 +233,14 @@ void LivoxLidarCallback::SetBlindSpotCallback(livox_status status, uint32_t hand
               << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
-                           LivoxLidarCallback::SetBlindSpotCallback, client_data);
+    Submit(lds_lidar, handle, "blind_spot", [&] { return SetLivoxLidarBlindSpot(handle, config.blind_spot_set,
+                           LivoxLidarCallback::SetBlindSpotCallback, client_data); });
     std::cout << "set blind spot timeout, handle: " << handle
               << ", try again..." << std::endl;
   } else {
     std::cout << "failed to set blind spot, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
+              << ", return code: " << (response ? int(response->ret_code) : -1)
+              << ", error key: " << (response ? int(response->error_key) : -1) << std::endl;
   }
   return;
 }
@@ -228,6 +248,7 @@ void LivoxLidarCallback::SetBlindSpotCallback(livox_status status, uint32_t hand
 void LivoxLidarCallback::SetDualEmitCallback(livox_status status, uint32_t handle,
                                              LivoxLidarAsyncControlResponse *response,
                                              void *client_data) {
+  RecordResult(client_data, handle, "dual_emit", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set dual emit mode since no lidar device found, handle: "
@@ -236,7 +257,7 @@ void LivoxLidarCallback::SetDualEmitCallback(livox_status status, uint32_t handl
   }
 
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::lock_guard<std::mutex> lock(lds_lidar->config_mutex_);
     lidar_device->livox_config.set_bits &= ~((uint32_t)(kConfigDualEmit));
     if (!lidar_device->livox_config.set_bits) {
@@ -246,14 +267,14 @@ void LivoxLidarCallback::SetDualEmitCallback(livox_status status, uint32_t handl
               << ", set_bit: " << lidar_device->livox_config.set_bits << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     const UserLivoxLidarConfig& config = lidar_device->livox_config;
-    SetLivoxLidarDualEmit(handle, config.dual_emit_en,
-                          LivoxLidarCallback::SetDualEmitCallback, client_data);
+    Submit(lds_lidar, handle, "dual_emit", [&] { return SetLivoxLidarDualEmit(handle, config.dual_emit_en,
+                          LivoxLidarCallback::SetDualEmitCallback, client_data); });
     std::cout << "set dual emit mode timeout, handle: " << handle
               << ", try again..." << std::endl;
   } else {
     std::cout << "failed to set dual emit mode, handle: " << handle
-              << ", return code: " << response->ret_code
-              << ", error key: " << response->error_key << std::endl;
+              << ", return code: " << (response ? int(response->ret_code) : -1)
+              << ", error key: " << (response ? int(response->error_key) : -1) << std::endl;
   }
   return;
 }
@@ -261,6 +282,7 @@ void LivoxLidarCallback::SetDualEmitCallback(livox_status status, uint32_t handl
 void LivoxLidarCallback::SetAttitudeCallback(livox_status status, uint32_t handle,
                                              LivoxLidarAsyncControlResponse *response,
                                              void *client_data) {
+  RecordResult(client_data, handle, "install_attitude", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set dual emit mode since no lidar device found, handle: "
@@ -269,7 +291,7 @@ void LivoxLidarCallback::SetAttitudeCallback(livox_status status, uint32_t handl
   }
 
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::cout << "successfully set lidar attitude, ip: " << IpNumToString(handle) << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     std::cout << "set lidar attitude timeout, ip: " << IpNumToString(handle)
@@ -283,8 +305,8 @@ void LivoxLidarCallback::SetAttitudeCallback(livox_status status, uint32_t handl
       config.extrinsic_param.y,
       config.extrinsic_param.z
     };
-    SetLivoxLidarInstallAttitude(config.handle, &attitude,
-                                 LivoxLidarCallback::SetAttitudeCallback, lds_lidar);
+    Submit(lds_lidar, config.handle, "install_attitude", [&] { return SetLivoxLidarInstallAttitude(config.handle, &attitude,
+                                 LivoxLidarCallback::SetAttitudeCallback, lds_lidar); });
   } else {
     std::cout << "failed to set lidar attitude, ip: " << IpNumToString(handle) << std::endl;
   }
@@ -293,6 +315,7 @@ void LivoxLidarCallback::SetAttitudeCallback(livox_status status, uint32_t handl
 void LivoxLidarCallback::EnableLivoxLidarImuDataCallback(livox_status status, uint32_t handle,
                                                          LivoxLidarAsyncControlResponse *response,
                                                          void *client_data) {
+  RecordResult(client_data, handle, "imu_enable", status, response);
   LidarDevice* lidar_device =  GetLidarDevice(handle, client_data);
   if (lidar_device == nullptr) {
     std::cout << "failed to set pattern mode since no lidar device found, handle: "
@@ -301,18 +324,12 @@ void LivoxLidarCallback::EnableLivoxLidarImuDataCallback(livox_status status, ui
   }
   LdsLidar* lds_lidar = static_cast<LdsLidar*>(client_data);
 
-  if (response == nullptr) {
-    std::cout << "failed to get response since no lidar IMU sensor found, handle: "
-              << handle << std::endl;
-    return;
-  }
-
-  if (status == kLivoxLidarStatusSuccess) {
+  if (LidarCommandSucceeded(status, response)) {
     std::cout << "successfully enable Livox Lidar imu, ip: " << IpNumToString(handle) << std::endl;
   } else if (status == kLivoxLidarStatusTimeout) {
     std::cout << "enable Livox Lidar imu timeout, ip: " << IpNumToString(handle)
               << ", try again..." << std::endl;
-    EnableLivoxLidarImuData(handle, LivoxLidarCallback::EnableLivoxLidarImuDataCallback, lds_lidar);
+    Submit(lds_lidar, handle, "imu_enable", [&] { return EnableLivoxLidarImuData(handle, LivoxLidarCallback::EnableLivoxLidarImuDataCallback, lds_lidar); });
   } else {
     std::cout << "failed to enable Livox Lidar imu, ip: " << IpNumToString(handle) << std::endl;
   }
@@ -328,6 +345,7 @@ LidarDevice* LivoxLidarCallback::GetLidarDevice(const uint32_t handle, void* cli
   uint8_t index = 0;
   int8_t ret = lds_lidar->cache_index_.GetIndex(kLivoxLidarType, handle, index);
   if (ret != 0) {
+    lds_lidar->health_monitor().RecordEvent(handle, "LIDAR_CONFIG_DEVICE_MISSING", "reason=handle_not_in_cache");
     return nullptr;
   }
 

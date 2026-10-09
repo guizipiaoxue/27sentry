@@ -3,6 +3,10 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <cstdlib>
+#include <iostream>
+#include <sstream>
+#include "run_logger.hpp"
 #include <functional>
 #include <map>
 #include <memory>
@@ -109,6 +113,9 @@ public:
     map_to_odom_broadcaster_(std::make_unique<tf2_ros::TransformBroadcaster>(
         *this))
   {
+    if (const char* session = std::getenv("SENTRY_RUNLOG_DIR")) {
+      if (*session) run_logger_ = std::make_unique<odom_logging::RunLogger>("backend");
+    }
     map_frame_ = declare_parameter<std::string>("backend.map_frame", "map");
     odom_frame_ = declare_parameter<std::string>("backend.odom_frame", "odom");
     prior_translation_sigma_ =
@@ -275,9 +282,20 @@ private:
     keyframes_.emplace(
       message->id,
       KeyframeData{message->cloud.header.stamp, odometry_pose, local_cloud});
-    isam2_->update(factors, initial_values);
-    optimizeAdditionalIterations();
-    optimized_values_ = isam2_->calculateEstimate();
+    std::ostringstream context;
+    context.precision(17);
+    context << "keyframe=" << message->id << " stamp=" << message->cloud.header.stamp.sec
+            << "." << message->cloud.header.stamp.nanosec << " graph_frames=" << keyframes_.size()
+            << " pending_loops=" << pending_loops_.size() << " factors=" << factors.size()
+            << " xyz=" << odometry_pose.translation().transpose()
+            << " quaternion=" << odometry_pose.rotation().toQuaternion().coeffs().transpose()
+            << " origin_distance_m=" << odometry_pose.translation().norm();
+    if (keyframes_.size() > 1) {
+      const auto previous = std::prev(keyframes_.find(message->id));
+      context << " previous=" << previous->first << " increment_m="
+              << previous->second.odometry_pose.between(odometry_pose).translation().norm();
+    }
+    updateGraph(factors, initial_values, context.str());
     addPendingLoops();
     publishOptimizedPathAndTransform();
 
@@ -317,9 +335,12 @@ private:
       gtsam::BetweenFactor<gtsam::Pose3>(
         poseKey(constraint.matched_index), poseKey(constraint.current_index),
         poseFromMessage(constraint.relative_pose), loop_noise_));
-    isam2_->update(factor, gtsam::Values());
-    optimizeAdditionalIterations();
-    optimized_values_ = isam2_->calculateEstimate();
+    std::ostringstream context;
+    context.precision(17);
+    context << "loop_current=" << constraint.current_index << " matched=" << constraint.matched_index
+            << " fitness=" << constraint.fitness << " graph_frames=" << keyframes_.size()
+            << " relative_xyz=" << poseFromMessage(constraint.relative_pose).translation().transpose();
+    updateGraph(factor, gtsam::Values(), context.str());
     ++accepted_loop_count_;
     RCLCPP_INFO(
       get_logger(),
@@ -340,6 +361,29 @@ private:
       } else {
         ++iterator;
       }
+    }
+  }
+
+  void updateGraph(const gtsam::NonlinearFactorGraph& factors,
+                   const gtsam::Values& values, const std::string& context) {
+    if (run_logger_) run_logger_->log("GRAPH_UPDATE_BEGIN", context);
+    const auto begin = std::chrono::steady_clock::now();
+    try {
+      isam2_->update(factors, values);
+      optimizeAdditionalIterations();
+      optimized_values_ = isam2_->calculateEstimate();
+      if (run_logger_) run_logger_->log("GRAPH_UPDATE_OK", context +
+          " elapsed_ms=" + std::to_string(std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - begin).count()));
+    } catch (const std::exception& error) {
+      // Abort does not run destructors: drain the logger before rethrowing.
+      const auto detail = context + " exception=" + error.what();
+      if (run_logger_) {
+        run_logger_->log("GRAPH_UPDATE_FATAL", detail);
+        run_logger_.reset();
+      }
+      std::cerr << "GRAPH_UPDATE_FATAL " << detail << std::endl;
+      throw;
     }
   }
 
@@ -476,6 +520,7 @@ private:
   gtsam::SharedNoiseModel odometry_noise_;
   gtsam::SharedNoiseModel loop_noise_;
 
+  std::unique_ptr<odom_logging::RunLogger> run_logger_;
   rclcpp::Subscription<loop_closure::msg::Keyframe>::SharedPtr keyframe_sub_;
   rclcpp::Subscription<loop_closure::msg::LoopConstraint>::SharedPtr loop_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr optimized_path_pub_;

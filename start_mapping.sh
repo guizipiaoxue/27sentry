@@ -5,6 +5,42 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
 cd "${ROOT_DIR}"
 
+# Select the same algorithm for the mapper input and the odometry pipeline.
+ODOM_ARGS=("$@")
+ODOM_ALGORITHM="${ODOM_ALGORITHM:-plio}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--algorithm)
+      if [[ $# -lt 2 ]]; then
+        echo "[start_mapping] $1 requires an algorithm name." >&2
+        exit 2
+      fi
+      ODOM_ALGORITHM="$2"
+      shift 2
+      ;;
+    --algorithm=*) ODOM_ALGORITHM="${1#*=}"; shift ;;
+    -h|--help) exec "${ROOT_DIR}/start_odom.sh" --help ;;
+    --) break ;;
+    *) shift ;;
+  esac
+done
+case "${ODOM_ALGORITHM,,}" in
+  plio|point-lio|point_lio)
+    ODOM_ALGORITHM="plio"
+    ODOM_NAME="Point-LIO"
+    MAP_KEYFRAME_TOPIC="/point_lio/keyframe_cloud"
+    ;;
+  dlio)
+    ODOM_ALGORITHM="dlio"
+    ODOM_NAME="DLIO"
+    MAP_KEYFRAME_TOPIC="/dlio/odom_node/pointcloud/keyframe"
+    ;;
+  *)
+    echo "[start_mapping] Unsupported algorithm: ${ODOM_ALGORITHM}; choose dlio or plio." >&2
+    exit 2
+    ;;
+esac
+
 ROS_SETUP="/opt/ros/humble/setup.bash"
 SLAM_SETUP="${ROOT_DIR}/slam/install/setup.bash"
 MAP_PARAMS="${MAP_PARAMS:-${ROOT_DIR}/slam/config/map.yaml}"
@@ -167,10 +203,10 @@ if [[ -t 0 ]]; then
   fi
 fi
 
-echo "[start_mapping] Starting DLIO KD-tree map builder..."
+echo "[start_mapping] Starting ${ODOM_NAME} KD-tree map builder..."
 setsid ros2 run map_ws kdtree_map --ros-args \
   --params-file "${MAP_PARAMS}" \
-  -r keyframe:=/dlio/odom_node/pointcloud/keyframe \
+  -r "keyframe:=${MAP_KEYFRAME_TOPIC}" \
   -r save_map:=/dlio/save_kdtree_map \
   -r clear_map:=/dlio/clear_kdtree_map &
 MAP_PID=$!
@@ -182,11 +218,11 @@ if ! kill -0 "${MAP_PID}" 2>/dev/null; then
 fi
 
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
-  echo "[start_mapping] Starting DLIO and GTSAM pipeline..."
+  echo "[start_mapping] Starting ${ODOM_NAME} and GTSAM pipeline..."
 else
-  echo "[start_mapping] Starting DLIO pipeline without GTSAM..."
+  echo "[start_mapping] Starting ${ODOM_NAME} pipeline without GTSAM..."
 fi
-setsid "${ROOT_DIR}/start_odom.sh" "$@" &
+setsid "${ROOT_DIR}/start_odom.sh" --algorithm "${ODOM_ALGORITHM}" "${ODOM_ARGS[@]}" &
 PIPELINE_PID=$!
 
 supervisor_watchdog "$$" "${MAP_PID}" "${PIPELINE_PID}" &

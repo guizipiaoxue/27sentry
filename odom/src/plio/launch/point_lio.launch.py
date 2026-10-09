@@ -58,6 +58,7 @@ def generate_launch_description():
                     ("registered", "/cloud_registered"),
                     ("registered_body", "/cloud_registered_body"),
                     ("keyframe", "/point_lio/keyframe"),
+                    ("kf_cloud", "/point_lio/keyframe_cloud"),
                 ],
             )]),
         ]

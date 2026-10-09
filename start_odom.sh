@@ -11,7 +11,7 @@ Usage: ./start_odom.sh [OPTIONS]
 Start the dual-Livox, dual-IMU fusion pipeline with the selected odometry.
 
 Options:
-  -a, --algorithm ALGORITHM  Odometry algorithm: dlio or plio (default: dlio)
+  -a, --algorithm ALGORITHM  Odometry algorithm: dlio or plio (default: plio)
       --record-bag           Record diagnostic topics (default)
       --no-record-bag        Disable rosbag recording
       --bag-output PATH      Set the rosbag output directory
@@ -23,7 +23,7 @@ PTP_CHECK_TIMEOUT=30, PTP_LOCK_TIMEOUT=30. PTP must be running before startup.
 EOF
 }
 
-ODOM_ALGORITHM="${ODOM_ALGORITHM:-dlio}"
+ODOM_ALGORITHM="${ODOM_ALGORITHM:-plio}"
 RECORD_ROSBAG="${RECORD_ROSBAG:-1}"
 ROSBAG_OUTPUT="${ROSBAG_OUTPUT:-}"
 while [[ $# -gt 0 ]]; do
@@ -123,29 +123,27 @@ source "${ODOM_SETUP}"
 set -u
 
 # Livox ROS Driver 2 links against the SDK shared library. SDK_DIR may be used
-# to override the installation directory; /usr/local/lib is used on this host.
+# to override the isolated SDK directory; prefer the project-local build.
 SDK_DIRS=(
   "${SDK_DIR:-}"
+  "${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
+  "${ROOT_DIR}/livox/install/livox_ros_driver2/lib"
   "/usr/local/lib"
   "${ROOT_DIR}/../Livox-SDK2/build/sdk_core"
-  "${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
 )
 SDK_FOUND=""
 for sdk_dir in "${SDK_DIRS[@]}"; do
-  if [[ -n "${sdk_dir}" && -f "${sdk_dir}/liblivox_lidar_sdk_shared.so" ]]; then
+  if [[ -n "${sdk_dir}" && -f "${sdk_dir}/liblivox_lidar_sdk_sentry.so" ]]; then
     SDK_FOUND="${sdk_dir}"
     break
   fi
 done
 if [[ -z "${SDK_FOUND}" ]]; then
-  echo "[start_odom] liblivox_lidar_sdk_shared.so not found." >&2
-  echo "             Set SDK_DIR=/path/to/lib or install it in /usr/local/lib." >&2
+  echo "[start_odom] liblivox_lidar_sdk_sentry.so not found." >&2
+  echo "             Run bash livox/build_isolated_sdk.sh first (or set SDK_DIR to an isolated SDK)." >&2
   exit 1
 fi
 export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"
-if [[ -d "/usr/local/lib" ]]; then
-  export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
-fi
 
 LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"
 if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
@@ -230,6 +228,27 @@ if [[ -n "${STALE_PIPELINE_PROCESSES}" ]]; then
   exit 1
 fi
 
+# One exact directory is inherited by every component, including ROS logs.
+export TZ=Asia/Shanghai
+RUNLOG_SESSION="$(date +%Y%m%d_%H%M%S)_${ODOM_ALGORITHM}_$$"
+export SENTRY_RUNLOG_DIR="${ROOT_DIR}/runlog/${RUNLOG_SESSION}"
+export ROS_LOG_DIR="${SENTRY_RUNLOG_DIR}/ros"
+mkdir -p "${ROS_LOG_DIR}" "${SENTRY_RUNLOG_DIR}/config"
+exec 3>&1 4>&2
+exec > >(tee -a "${SENTRY_RUNLOG_DIR}/console.log") 2>&1
+CONSOLE_PID=$!
+MONITOR_PID=""
+JOURNAL_PID=""
+echo "[start_odom] Runlog: ${SENTRY_RUNLOG_DIR}"
+
+finish_runlog() {
+  kill "${MONITOR_PID}" "${JOURNAL_PID}" 2>/dev/null || true
+  wait "${MONITOR_PID}" "${JOURNAL_PID}" 2>/dev/null || true
+  echo "[start_odom] Runlog finalized: ${SENTRY_RUNLOG_DIR}"
+  exec 1>&3 2>&4 3>&- 4>&-
+  wait "${CONSOLE_PID}" 2>/dev/null || true
+}
+
 DRIVER_PID=""
 FUSION_PID=""
 ODOM_PID=""
@@ -241,7 +260,7 @@ stop_process_group() {
   local pid="$1"
   local signal="$2"
   if [[ -z "${pid}" ]]; then
-    return
+    return 0
   fi
 
   if kill -0 -- "-${pid}" 2>/dev/null; then
@@ -272,7 +291,11 @@ force_cleanup() {
   trap '' INT TERM
   printf '\n[start_odom] Forced shutdown requested; killing all nodes.\n' >&2
   stop_all_processes KILL
-  wait 2>/dev/null || true
+  for pid in "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}" "${BACKEND_PID}" "${BAG_PID}"; do
+    [[ -z "${pid}" ]] || wait "${pid}" 2>/dev/null || true
+  done
+  echo "[start_odom] Supervisor exit status=${status}"
+  finish_runlog
   exit "${status}"
 }
 
@@ -299,7 +322,11 @@ cleanup() {
     done
     stop_process_group "${BAG_PID}" KILL
   fi
-  wait 2>/dev/null || true
+  for pid in "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}" "${BACKEND_PID}" "${BAG_PID}"; do
+    [[ -z "${pid}" ]] || wait "${pid}" 2>/dev/null || true
+  done
+  echo "[start_odom] Supervisor exit status=${status}"
+  finish_runlog
   exit "${status}"
 }
 trap cleanup EXIT
@@ -308,6 +335,38 @@ trap cleanup EXIT
 # cleanup installs force_cleanup as the second-Ctrl+C fallback.
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+{
+  date --iso-8601=ns
+  printf 'algorithm=%s bag=%s sdk=%s\n' "${ODOM_ALGORITHM}" "${ROSBAG_OUTPUT}" "${SDK_FOUND}"
+  git -C "${ROOT_DIR}" rev-parse HEAD || true
+  git -C "${ROOT_DIR}" diff || true
+  sysctl net.core.rmem_max net.core.rmem_default
+  env | grep -E '^(ROS_|RMW_|PTP_|CYCLONEDDS_|FASTRTPS_|SENTRY_RUNLOG_DIR|TZ)=' || true
+  sha256sum "${SDK_FOUND}/liblivox_lidar_sdk_sentry.so"
+  for package_executable in "${REQUIRED_EXECUTABLES[@]}"; do
+    read -r package executable <<<"${package_executable}"
+    prefix="$(ros2 pkg prefix "${package}")"
+    sha256sum "${prefix}/lib/${package}/${executable}"
+  done
+  for config_file in "${CONFIG_FILES[@]}" "${ROOT_DIR}/slam/config/gimbal_lidar_5.yaml" "${ROOT_DIR}/slam/config/gimbal_lidar_3.yaml"; do
+    sha256sum "${config_file}"
+    cp "${config_file}" "${SENTRY_RUNLOG_DIR}/config/"
+  done
+  for config_file in /etc/linuxptp/sentry/*.conf; do
+    [[ ! -r "${config_file}" ]] || cp "${config_file}" "${SENTRY_RUNLOG_DIR}/config/"
+  done
+} > "${SENTRY_RUNLOG_DIR}/context.txt" 2>&1
+python3 "${ROOT_DIR}/scripts/runlog_monitor.py" "${SENTRY_RUNLOG_DIR}" &
+MONITOR_PID=$!
+# Existing servo services only: reading the journal never changes their state.
+journalctl -f --since '2 minutes ago' -o short-iso-precise _COMM=ptp4l _COMM=phc2sys > "${SENTRY_RUNLOG_DIR}/ptp.log" 2>&1 &
+JOURNAL_PID=$!
+
+if (( $(sysctl -n net.core.rmem_max) < 209715200 )); then
+  echo "[start_odom] WARNING: UDP receive ceiling still below SDK 200 MiB request."
+  echo "[start_odom] Expand before the next test: sudo bash ${ROOT_DIR}/scripts/expand_udp_buffers.sh"
+fi
 
 source "${ROOT_DIR}/scripts/ptp_runtime.sh"
 ptp_check_host "${ROOT_DIR}" "${LIVOX_CONFIG}"
@@ -362,6 +421,10 @@ if [[ "${RECORD_ROSBAG}" == "1" ]]; then
     /tf
     /tf_static
     /parameter_events
+    /point_lio/keyframe
+    /dlio/odom_node/keyframe
+    /loop_closure/constraint
+    /mapping/optimized_path
     /rosout
   )
   mkdir -p "$(dirname -- "${ROSBAG_OUTPUT}")"
@@ -469,6 +532,7 @@ if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
 else
   setsid ros2 run plio point_lio --ros-args \
     --params-file "${ODOM_PARAMS}" \
+    -p runlog.enabled:=true \
     -p use_sim_time:=false \
     -r pointcloud:=/gimbal/cloud_fused \
     -r imu:=/gimbal/imu_fused \
@@ -476,7 +540,8 @@ else
     -r path:=/path \
     -r registered:=/cloud_registered \
     -r registered_body:=/cloud_registered_body \
-    -r keyframe:=/point_lio/keyframe &
+    -r keyframe:=/point_lio/keyframe \
+    -r kf_cloud:=/point_lio/keyframe_cloud &
 fi
 ODOM_PID=$!
 
@@ -489,7 +554,7 @@ fi
 if [[ "${ODOM_ALGORITHM}" == "dlio" ]]; then
   echo "[start_odom] DLIO keyframe cloud: /dlio/odom_node/pointcloud/keyframe"
 else
-  echo "[start_odom] Point-LIO topics: /point_lio/odom, /path, /cloud_registered, /point_lio/keyframe"
+  echo "[start_odom] Point-LIO topics: /point_lio/odom, /path, /cloud_registered, /point_lio/keyframe, /point_lio/keyframe_cloud"
 fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   echo "[start_odom] GTSAM enabled. Optimized map is written only on save."
@@ -508,4 +573,9 @@ fi
 if [[ "${ENABLE_GTSAM}" == "1" ]]; then
   PIPELINE_PIDS+=("${LOOP_PID}" "${BACKEND_PID}")
 fi
-wait -n "${PIPELINE_PIDS[@]}"
+EXITED_PID=""
+EXIT_STATUS=0
+wait -n -p EXITED_PID "${PIPELINE_PIDS[@]}" || EXIT_STATUS=$?
+printf '[start_odom] Child exited pid=%s status=%s; driver=%s fusion=%s odom=%s loop=%s backend=%s bag=%s\n' \
+  "${EXITED_PID:-unknown}" "${EXIT_STATUS}" "${DRIVER_PID}" "${FUSION_PID}" "${ODOM_PID}" "${LOOP_PID}" "${BACKEND_PID}" "${BAG_PID}"
+exit "${EXIT_STATUS}"

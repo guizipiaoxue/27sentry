@@ -27,6 +27,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <sys/times.h>
@@ -199,6 +200,15 @@ class PointLioNode final : public rclcpp::Node {
     imu_subscription_ = create_subscription<sensor_msgs::msg::Imu>(
         "imu", rclcpp::SensorDataQoS().keep_last(1000),
         std::bind(&PointLioNode::imuCallback, this, std::placeholders::_1), imu_options);
+    const auto status_qos = rclcpp::QoS(1).reliable().transient_local();
+    ptp_subscription_ = create_subscription<std_msgs::msg::Bool>(
+        "/livox/ptp_locked", status_qos, [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+          logEvent("PTP_STATUS", "locked=" + std::to_string(msg->data));
+        });
+    calibration_subscription_ = create_subscription<std_msgs::msg::Bool>(
+        "/gimbal/imu_calibrated", status_qos, [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+          logEvent("CALIBRATION_STATUS", "calibrated=" + std::to_string(msg->data));
+        });
     cloud_callback_group_ = create_callback_group(
         rclcpp::CallbackGroupType::Reentrant);
     rclcpp::SubscriptionOptions cloud_options;
@@ -220,6 +230,8 @@ class PointLioNode final : public rclcpp::Node {
     body_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>("registered_body", output_qos);
     keyframe_publisher_ = create_publisher<loop_closure::msg::Keyframe>(
         "keyframe", rclcpp::QoS(20).reliable());
+    keyframe_cloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "kf_cloud", rclcpp::QoS(20).reliable());
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     state_callback_group_ = create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -392,6 +404,19 @@ class PointLioNode final : public rclcpp::Node {
     if (run_logger_) run_logger_->log(event, payload);
   }
 
+  // Processing callback group serializes these calls; bound repeated wait logs.
+  void logScanWait(double end, double latest) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_wait_log_ < std::chrono::seconds(1)) return;
+    last_wait_log_ = now;
+    std::lock_guard<std::mutex> lock(mutex_);
+    logEvent("SCAN_WAIT_IMU", "end=" + numberText(end, 9) +
+        " latest_imu=" + numberText(latest, 9) + " lag_s=" + numberText(end - latest, 9) +
+        " pending=" + std::to_string(pending_clouds_.size() + 1) +
+        " pending_drops=" + std::to_string(cloud_queue_drops_.load()) +
+        " dds_drops=" + std::to_string(cloud_transport_drops_.load()));
+  }
+
   void printTerminalHeader() const {
     if (terminal_clear_screen_) std::cout << "\033[2J\033[1;1H";
     std::cout << "\n+-------------------------------------------------------------------+\n"
@@ -422,6 +447,16 @@ class PointLioNode final : public rclcpp::Node {
         logEvent("IMU_REJECT", "reason=non_increasing_stamp stamp=" +
                          numberText(sample.stamp, 9));
         return;
+      }
+      const auto arrival = std::chrono::steady_clock::now();
+      const double wall_gap = last_imu_arrival_.time_since_epoch().count() ?
+          std::chrono::duration<double>(arrival - last_imu_arrival_).count() : 0.0;
+      const double sample_gap = last_input_stamp_ > 0 ? sample.stamp - last_input_stamp_ : 0.0;
+      if (wall_gap > 0.1 || sample_gap > 0.1) {
+        logEvent("IMU_GAP", "sample_gap_s=" + numberText(sample_gap, 9) +
+            " arrival_gap_s=" + numberText(wall_gap, 9) +
+            " previous_stamp=" + numberText(last_input_stamp_, 9) +
+            " stamp=" + numberText(sample.stamp, 9));
       }
       last_input_stamp_ = sample.stamp;
       sample = imu_conditioning_.apply(sample);
@@ -519,24 +554,28 @@ class PointLioNode final : public rclcpp::Node {
                 return a.curvature < b.curvature;
               })->curvature;
       if (latest_imu_stamp < end) {
-        logEvent("SCAN_WAIT_IMU", "end=" + numberText(end, 9));
+        logScanWait(end, latest_imu_stamp);
         std::lock_guard<std::mutex> lock(mutex_);
         pending_clouds_.push_front(std::move(pending));
         break;
       }
 
-      logEvent(
-          "SCAN_PROCESS_BEGIN",
-          "stamp=" + numberText(stampSeconds(pending.stamp), 9) +
-              " end=" + numberText(end, 9) +
-              " points=" + std::to_string(pending.cloud->size()));
+      const auto attempt = std::chrono::steady_clock::now();
+      if (end != last_process_log_end_ || attempt - last_process_log_ >= std::chrono::seconds(1)) {
+        logEvent("SCAN_PROCESS_BEGIN",
+            "stamp=" + numberText(stampSeconds(pending.stamp), 9) +
+                " end=" + numberText(end, 9) +
+                " points=" + std::to_string(pending.cloud->size()));
+        last_process_log_end_ = end;
+        last_process_log_ = attempt;
+      }
       const auto begin = std::chrono::steady_clock::now();
       Result result = estimator_->process(
           pending.cloud, stampSeconds(pending.stamp));
       const double computation_seconds = std::chrono::duration<double>(
           std::chrono::steady_clock::now() - begin).count();
       if (result.waiting_for_imu) {
-        logEvent("SCAN_WAIT_IMU", "end=" + numberText(end, 9));
+        logScanWait(end, latest_imu_stamp);
         std::lock_guard<std::mutex> lock(mutex_);
         pending_clouds_.push_front(std::move(pending));
         break;
@@ -604,7 +643,11 @@ class PointLioNode final : public rclcpp::Node {
                 " filtered=" + std::to_string(result.filtered_points) +
                 " matched=" + std::to_string(result.matched_points) +
                 " position=" + vectorText(result.position, 6) +
-                " velocity=" + vectorText(result.velocity, 6));
+                " velocity=" + vectorText(result.velocity, 6) +
+                " origin_distance_m=" + numberText(result.position.norm(), 6) +
+                " imu_lead_s=" + numberText(imu_lead, 9) +
+                " pending_drops=" + std::to_string(cloud_queue_drops_.load()) +
+                " dds_drops=" + std::to_string(cloud_transport_drops_.load()));
         ready.push_back({
             std::move(result), pending.stamp, computation_seconds,
             average_computation, maximum_computation, rateAverage(imu_rates_),
@@ -877,6 +920,7 @@ class PointLioNode final : public rclcpp::Node {
     keyframe.cloud.header.stamp = stamp;
     keyframe.cloud.header.frame_id = world_frame_;
     keyframe_publisher_->publish(keyframe);
+    keyframe_cloud_publisher_->publish(keyframe.cloud);
     last_keyframe_position_ = result.position;
     last_keyframe_orientation_ = orientation;
     has_keyframe_pose_ = true;
@@ -1070,6 +1114,11 @@ class PointLioNode final : public rclcpp::Node {
   std::atomic<std::size_t> cloud_transport_drops_{0};
   std::unique_ptr<PointLioEstimator> estimator_;
   std::unique_ptr<odom_logging::RunLogger> run_logger_;
+  std::chrono::steady_clock::time_point last_wait_log_{};
+  std::chrono::steady_clock::time_point last_process_log_{};
+  double last_process_log_end_ = 0.0;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ptp_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr calibration_subscription_;
   bool runlog_enabled_ = false;
   std::string world_frame_;
   std::string body_frame_;
@@ -1127,6 +1176,7 @@ class PointLioNode final : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr registered_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr body_publisher_;
   rclcpp::Publisher<loop_closure::msg::Keyframe>::SharedPtr keyframe_publisher_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_cloud_publisher_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::CallbackGroup::SharedPtr state_callback_group_;
   rclcpp::CallbackGroup::SharedPtr imu_callback_group_;

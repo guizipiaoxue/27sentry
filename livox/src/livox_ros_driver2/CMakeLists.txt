@@ -86,7 +86,7 @@ if(ROS_EDITION STREQUAL "ROS1")
   #---------------------------------------------------------------------------------------
   # Compiler config
   #---------------------------------------------------------------------------------------
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -133,6 +133,7 @@ if(ROS_EDITION STREQUAL "ROS1")
     src/comm/lidar_imu_data_queue.cpp
     src/comm/cache_index.cpp
     src/comm/pub_handler.cpp
+    src/comm/lidar_health_monitor.cpp
 
     src/parse_cfg_file/parse_cfg_file.cpp
     src/parse_cfg_file/parse_livox_lidar_cfg.cpp
@@ -150,6 +151,7 @@ if(ROS_EDITION STREQUAL "ROS1")
     ${PCL_INCLUDE_DIRS}
     ${APR_INCLUDE_DIRS}
     3rdparty
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../odom/src/common
     src
   )
 
@@ -196,9 +198,9 @@ else(ROS_EDITION STREQUAL "ROS2")
     set(CMAKE_C_STANDARD 99)
   endif()
 
-  # Default to C++14
+  # Shared asynchronous run logger uses C++17 filesystem.
   if(NOT CMAKE_CXX_STANDARD)
-    set(CMAKE_CXX_STANDARD 14)
+    set(CMAKE_CXX_STANDARD 17)
   endif()
 
   list(INSERT CMAKE_MODULE_PATH 0 "${PROJECT_SOURCE_DIR}/cmake/modules")
@@ -257,8 +259,20 @@ else(ROS_EDITION STREQUAL "ROS2")
       "${LIVOX_SDK_ROOT}/include"
       /usr/local
       /usr)
+  # Prefer the local SDK with private C++ symbols, unless explicitly overridden.
+  # Discard the cached pre-isolation library when upgrading an existing build.
+  if(LIVOX_LIDAR_SDK_LIBRARY MATCHES "/liblivox_lidar_sdk_shared\\.so$")
+    unset(LIVOX_LIDAR_SDK_LIBRARY CACHE)
+    unset(LIVOX_LIDAR_SDK_INCLUDE_DIR CACHE)
+  endif()
+  if(NOT LIVOX_SDK_ROOT)
+    find_library(LIVOX_LIDAR_SDK_LIBRARY NAMES livox_lidar_sdk_sentry
+      PATHS "${PROJECT_SOURCE_DIR}/.livox_sdk/lib" NO_DEFAULT_PATH)
+    find_path(LIVOX_LIDAR_SDK_INCLUDE_DIR NAMES livox_lidar_api.h
+      PATHS "${PROJECT_SOURCE_DIR}/.livox_sdk/include" NO_DEFAULT_PATH)
+  endif()
   find_library(LIVOX_LIDAR_SDK_LIBRARY
-      NAMES livox_lidar_sdk_shared
+      NAMES livox_lidar_sdk_sentry
       HINTS ${_LIVOX_SDK_HINTS}
       PATH_SUFFIXES lib lib64)
   find_path(LIVOX_LIDAR_SDK_INCLUDE_DIR
@@ -267,11 +281,14 @@ else(ROS_EDITION STREQUAL "ROS2")
       PATH_SUFFIXES include)
   if(NOT LIVOX_LIDAR_SDK_LIBRARY OR NOT LIVOX_LIDAR_SDK_INCLUDE_DIR)
     message(FATAL_ERROR
-      "Livox SDK not found. Install liblivox_lidar_sdk_shared.so and its headers, "
-      "then set LIVOX_SDK_ROOT=/path/to/livox-sdk (or use /usr/local).")
+      "Isolated Livox SDK not found. Run bash livox/build_isolated_sdk.sh "
+      "from the repository root; optionally pass the Livox-SDK2 source path. "
+      "For another isolated installation, set LIVOX_SDK_ROOT=/path/to/sdk.")
   endif()
   message(STATUS "Livox SDK library: ${LIVOX_LIDAR_SDK_LIBRARY}")
   message(STATUS "Livox SDK headers: ${LIVOX_LIDAR_SDK_INCLUDE_DIR}")
+  # Keep the uniquely named runtime dependency in the ROS package's lib path.
+  install(FILES ${LIVOX_LIDAR_SDK_LIBRARY} DESTINATION lib)
 
   ## PCL library
   link_directories(${PCL_LIBRARY_DIRS})
@@ -291,6 +308,7 @@ else(ROS_EDITION STREQUAL "ROS2")
     src/comm/lidar_imu_data_queue.cpp
     src/comm/cache_index.cpp
     src/comm/pub_handler.cpp
+    src/comm/lidar_health_monitor.cpp
 
     src/parse_cfg_file/parse_cfg_file.cpp
     src/parse_cfg_file/parse_livox_lidar_cfg.cpp
@@ -320,6 +338,7 @@ else(ROS_EDITION STREQUAL "ROS2")
     ${LIVOX_LIDAR_SDK_INCLUDE_DIR}
     ${LIVOX_INTERFACES_INCLUDE_DIRECTORIES}   # for custom msgs
     3rdparty
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../odom/src/common
     src
   )
 
@@ -339,6 +358,25 @@ else(ROS_EDITION STREQUAL "ROS2")
   )
 
   if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(sdk_logging_test test/sdk_logging_test.cpp)
+    target_include_directories(sdk_logging_test PRIVATE ${LIVOX_LIDAR_SDK_INCLUDE_DIR})
+    target_compile_definitions(sdk_logging_test PRIVATE
+      LIVOX_TEST_SDK_LIBRARY="${LIVOX_LIDAR_SDK_LIBRARY}")
+    ament_target_dependencies(sdk_logging_test rclcpp)
+    target_link_libraries(sdk_logging_test ${CMAKE_DL_LIBS})
+    add_test(NAME sdk_logging_test COMMAND sdk_logging_test)
+    set_tests_properties(sdk_logging_test PROPERTIES
+      FAIL_REGULAR_EXPRESSION "LOG ERROR;bad_alloc")
+    add_executable(lidar_health_monitor_test
+      test/lidar_health_monitor_test.cpp
+      src/comm/lidar_health_monitor.cpp)
+    target_include_directories(lidar_health_monitor_test PRIVATE
+      src 3rdparty ${LIVOX_LIDAR_SDK_INCLUDE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../../../odom/src/common)
+    target_link_libraries(lidar_health_monitor_test
+      ${LIVOX_LIDAR_SDK_LIBRARY} Threads::Threads)
+    add_test(NAME lidar_health_monitor_test COMMAND lidar_health_monitor_test)
     find_package(ament_lint_auto REQUIRED)
     # the following line skips the linter which checks for copyrights
     # uncomment the line when a copyright and license is not present in all source files

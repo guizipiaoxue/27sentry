@@ -87,7 +87,15 @@ bool LdsLidar::InitLdsLidar(const std::string& path_name) {
   }
 
   path_ = path_name;
+  health_monitor_.SetStreamSummary([](uint32_t handle) { return pub_handler().HealthSummary(handle); });
+  pub_handler().SetHealthEvents([this](const std::string& event, const std::string& payload) {
+    health_monitor_.RecordDriverEvent(event, payload);
+  });
+  health_monitor_.Start();
   if (!InitLidars()) {
+    health_monitor_.RecordEvent(0, "LIDAR_INIT_FAILED", "reason=config_or_sdk_init_failed");
+    health_monitor_.Stop();
+    pub_handler().SetHealthEvents({});
     return false;
   }
   SetLidarPubHandle();
@@ -127,9 +135,7 @@ bool LdsLidar::ParseSummaryConfig() {
 }
 
 bool LdsLidar::InitLivoxLidar() {
-#ifdef BUILDING_ROS2
-  DisableLivoxSdkConsoleLogger();
-#endif
+  // The isolated SDK keeps its spdlog private; retain SDK diagnostics in console.log.
 
   // parse user config
   LivoxLidarConfigParser parser(path_);
@@ -141,6 +147,7 @@ bool LdsLidar::InitLivoxLidar() {
   std::vector<uint32_t> expected_handles;
   for (const auto& config : user_configs) expected_handles.push_back(config.handle);
   pub_handler().SetExpectedLidars(expected_handles);
+  health_monitor_.SetExpectedDevices(expected_handles);
 
   // SDK initialization
   if (!LivoxLidarSdkInit(path_.c_str())) {
@@ -206,7 +213,9 @@ int LdsLidar::DeInitLdsLidar(void) {
   }
 
   if (lidar_summary_info_.lidar_type & kLivoxLidarType) {
+    health_monitor_.Stop();
     LivoxLidarSdkUninit();
+    pub_handler().SetHealthEvents({});
     printf("Livox Lidar SDK Deinit completely!\n");
   }
 

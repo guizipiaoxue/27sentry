@@ -1,0 +1,16 @@
+{
+  global:
+    GetLivox*;
+    Livox*;
+    SetLivox*;
+    EnableLivox*;
+    DisableLivox*;
+    QueryLivox*;
+    SaveLivox*;
+    SetLidarFogNoiseFilterMode;
+    SetNTPServerIp;
+    StartForcedHeating;
+    StopForcedHeating;
+    UpgradeLivoxLidars;
+  local: *;
+};

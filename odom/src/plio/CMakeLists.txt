@@ -20,6 +20,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 add_executable(point_lio
@@ -31,7 +32,7 @@ target_include_directories(
 target_link_libraries(point_lio ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
 ament_target_dependencies(
   point_lio geometry_msgs loop_closure nav_msgs pcl_conversions rclcpp rcl_interfaces
-  sensor_msgs tf2_ros)
+  sensor_msgs std_msgs tf2_ros)
 
 install(TARGETS point_lio DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})

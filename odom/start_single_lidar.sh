@@ -11,8 +11,8 @@ source "${ROOT_DIR}/livox/install/setup.bash"
 [[ -f "${ROOT_DIR}/odom/install/setup.bash" ]] && source "${ROOT_DIR}/odom/install/setup.bash"
 set -u
 
-# Livox SDK 固定安装路径
-export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+# 优先使用隔离 SDK，独立库名避免误加载系统 SDK。
+export LD_LIBRARY_PATH="${SDK_DIR:-${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib}:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 # MID360 3 号雷达配置
 LIVOX_CONFIG="${LIVOX_CONFIG:-${ROOT_DIR}/livox/src/livox_ros_driver2/config/MID360_config_2.json}"

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <vector>
@@ -62,6 +63,11 @@ struct TimestampResult {
 // last sample times are independent for the asynchronous cloud and IMU flows.
 class TimestampGuard {
  public:
+  // Called before expiration resets a device; observer must not reenter guard.
+  using ExpiryObserver = std::function<void(std::uint32_t, SensorStream,
+      std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t)>;
+  void SetExpiryObserver(ExpiryObserver observer) { expiry_observer_ = std::move(observer); }
+
   void Configure(const TimestampConfig& config) {
     if (config.ptp_utc_offset_seconds < 0 ||
         config.ptp_utc_offset_seconds > 3600 ||
@@ -199,15 +205,20 @@ class TimestampGuard {
     const auto timeout_ns = static_cast<std::uint64_t>(
         config_.ptp_stream_timeout_seconds * 1e9);
     for (auto& item : devices_) {
-      for (const auto& flow : item.second.flows) {
+      for (std::size_t index = 0; index < item.second.flows.size(); ++index) {
+        const auto& flow = item.second.flows[index];
         if (flow.seen && (steady_ns < flow.arrival_ns ||
                          steady_ns - flow.arrival_ns >= timeout_ns)) {
+          if (expiry_observer_) expiry_observer_(item.first,
+              static_cast<SensorStream>(index), flow.last_ns, flow.arrival_ns,
+              steady_ns, item.second.generation);
           Reset(item.second, steady_ns);
           break;
         }
       }
     }
   }
+  ExpiryObserver expiry_observer_;
   TimestampConfig config_;
   std::map<std::uint32_t, Device> devices_;
 };

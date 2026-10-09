@@ -38,6 +38,7 @@
 #include "livox_lidar_api.h"
 #include "comm/comm.h"
 #include "comm/ptp_time.h"
+#include "run_logger.hpp"
 
 namespace livox_ros {
 
@@ -79,7 +80,7 @@ class PubHandler {
   using PointCloudsCallback = std::function<void(PointFrame*, void *)>;
   using ImuDataCallback = std::function<void(ImuData*, void*)>;
 
-  PubHandler() {}
+  PubHandler();
 
   ~ PubHandler() { Uninit(); }
 
@@ -93,6 +94,11 @@ class PubHandler {
   void SetImuDataCallback(ImuDataCallback cb, void* client_data);
   void SetTimestampConfig(const TimestampConfig& config);
   void SetExpectedLidars(const std::vector<uint32_t>& handles);
+  std::string HealthSummary(uint32_t handle);
+  void SetHealthEvents(std::function<void(const std::string&, const std::string&)> observer) {
+    std::lock_guard<std::mutex> lock(health_events_mutex_);
+    health_events_ = std::move(observer);
+  }
   bool IsPtpLocked();
   bool IsCurrentGeneration(uint32_t handle, SensorStream stream, uint64_t generation);
   bool PublishIfCurrent(uint32_t handle, SensorStream stream, uint64_t generation,
@@ -100,6 +106,23 @@ class PubHandler {
                         const std::function<void()>& publish);
 
  private:
+  void RecordArrival(uint32_t handle, SensorStream stream,
+                     const LivoxLidarEthernetPacket& data, uint64_t arrival);
+  void Diagnostic(const std::string& event, const std::string& payload);
+  struct FlowDiagnostic {
+    uint64_t arrival = 0, wire_stamp = 0, summary = 0, packets = 0;
+    uint64_t rejects = 0, last_reject_log = 0, max_gap = 0, sequence_changes = 0;
+    uint16_t sequence = 0;
+    uint64_t accepted_arrival = 0;
+    TimestampError last_error = TimestampError::kNone;
+    std::map<TimestampError, uint64_t> reasons;
+  };
+  std::unique_ptr<odom_logging::RunLogger> run_logger_;
+  std::mutex diagnostic_mutex_;
+  std::map<std::pair<uint32_t, SensorStream>, FlowDiagnostic> diagnostics_;
+  std::function<void(const std::string&, const std::string&)> health_events_;
+  std::mutex health_events_mutex_;
+  uint64_t health_timeout_ns_ = 500000000ULL;
   //thread to process raw data
   void RawDataProcess();
   std::atomic<bool> is_quit_{false};
@@ -137,6 +160,7 @@ class PubHandler {
   std::mutex timestamp_mutex_;
   TimestampGuard timestamp_guard_;
   std::map<std::pair<uint32_t, SensorStream>, uint64_t> timestamp_warning_times_;
+  std::map<std::pair<uint32_t, SensorStream>, std::pair<uint64_t, uint64_t>> stale_publish_counts_;
   std::map<uint32_t, uint64_t> processed_generations_;
   std::map<uint32_t, FrameBoundary> frame_boundaries_;
   uint16_t lidar_listen_id_ = 0;

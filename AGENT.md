@@ -46,8 +46,10 @@ MID360 192.168.1.5 / 192.168.1.3
 
 ## 启动与配置
 
-- `start_odom.sh --algorithm dlio|plio`：双雷达采集、融合、标定、里程计，默认录包。
-- `start_mapping.sh`：调用里程计入口并启动 KD-tree 地图；退出时保存地图。
+- `start_odom.sh --algorithm dlio|plio`：双雷达采集、融合、标定、里程计，默认 PLIO 并录包。
+- `start_mapping.sh`：默认调用 PLIO 里程计并启动 KD-tree 地图；退出时保存地图。
+  可用 `--algorithm dlio` 或 `ODOM_ALGORITHM=dlio` 切换；KD-tree 输入随算法选择，
+  PLIO 使用 `/point_lio/keyframe_cloud`（PointCloud2），回环使用 `/point_lio/keyframe`。
 - `rotate_cali.sh`：双雷达 yaw 圆周标定入口；调用单雷达 DLIO 和标定节点。
 - `odom/start_single_lidar.sh`：单雷达 DLIO 检查。
 - `start_pcl.sh`：旧点云展示入口，依赖外部运行的驱动和显式提供的标定文件。
@@ -65,6 +67,35 @@ bootstrap 只初始化 PHC，已对齐时跳过 step；偏差超限且存在采�
 时拒绝初始化。持续 servo 方向为系统 UTC 到 PHC，禁止 step 并限制频率调整。
 相同部署复用运行实例；改变已运行服务的文件须在维护窗口先停用，不能隐式重启。
 安装和运维细节见 `docs/PTP.md`。
+
+## 复测诊断
+
+`start_odom.sh` 自动建立 `runlog/YYYYMMDD_HHMMSS_算法_PID/`，导出
+`SENTRY_RUNLOG_DIR`（组件共用的精确目录）和 `ROS_LOG_DIR`，并为 PLIO 启用 runlog。
+全节点控制台、驱动超时/拒绝/阻塞、主机 UDP/socket/资源、PTP journal、里程计和
+位姿图日志及配置快照集中保存；文件含义见 README。诊断只读、异步且限流，不能
+在传感器回调中同步写盘。异常退出须保留 PID/状态码和录包刷新，日志辅助进程
+不得放入主链路 `wait -n`，关闭控制台管道后才能等待 tee。
+
+驱动接收 MID360 主动状态推送，另每 5 秒只读查询内部信息；配置设备即使未被发现
+也每秒输出状态摘要。温度、工作状态、诊断级别、完整 HMS 出现/清除、配置命令
+返回/提交失败及驱动异常镜像写入 `lidar_health.log` 并在专用线程输出控制台。
+SDK 内部无统一错误回调，保留其控制台输出并由入口捕获到 `console.log`。
+ROS2 必须链接本项目隔离构建的 `liblivox_lidar_sdk_sentry.so`；SDK 自带 spdlog
+1.3 与 ROS 的 spdlog 1.9 不能共享 C++ 符号，否则开启日志或退出时会段错误。
+隔离构建只导出 SDK 公共 C API，使用独立 SONAME，并随驱动安装到包的 lib 目录。
+部分推送只刷新包含字段；缺失或超过 15 秒的诊断不能显示为当前正常。命令成功
+必须校验 SDK status、响应非空及设备 ret_code；工作模式重试不能阻塞 SDK 回调。
+健康报告队列溢出要记录丢失数并作废缓存诊断。独立运行未指定会话目录时，健康
+日志也保存到当前目录的 `runlog/YYYYMMDD_HHMMSS/`。`core_temp` 单位为
+0.01 ℃，日志同时保留 `core_temp_raw` 和 `core_temp_c`；内部核心温度不同于环境
+温度。诊断失败不得当作正常值；退出时先停止查询线程，再关闭 SDK。与丢包归因
+有关的协议依据及故障码见 README；不要为了获取温度另起一个会配置设备的 SDK。
+
+`sudo bash scripts/expand_udp_buffers.sh` 备份并持久化 UDP 接收上限为
+1073741823 字节，再验证 SDK 的 200 MiB 请求；只提高上限，不改默认缓冲或 PTP。
+需要 root，已打开的 socket 不随 sysctl 自动扩容，下次采集必须新建 socket。
+离线超时归因和监督进程测试位于 `scripts/tests/`。
 
 ## 时间戳契约
 
@@ -105,10 +136,11 @@ bootstrap 只初始化 PHC，已对齐时跳过 step；偏差超限且存在采�
 ## 构建与验证
 
 先 source `/opt/ros/humble/setup.bash`。构建顺序为 `livox -> slam -> odom`，
-串口独立构建后供 navigation 使用。Livox 使用 ROS2 模式和本机安装的 SDK2：
+串口独立构建后供 navigation 使用。Livox 使用 ROS2 模式和隔离构建的 SDK2：
 
 ```bash
 cd livox
+bash build_isolated_sdk.sh # 默认源目录 ../../Livox-SDK2；可传入其他源目录
 colcon build --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 cd ../slam
@@ -120,7 +152,9 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 `build_dlio.sh`、`build_plio.sh` 提供增量构建；回环默认编译仓库 GTSAM，
 `-DLOOP_CLOSURE_USE_SYSTEM_GTSAM=ON` 仅适用于兼容的本机安装。
-SDK 运行库可通过 `SDK_DIR` 指定；常见目录为 `/usr/local/lib`。
+SDK 运行库优先使用 `livox/src/livox_ros_driver2/.livox_sdk/lib`；可通过 `SDK_DIR`
+指定其他隔离 SDK 目录。ROS2 不再加载普通 `liblivox_lidar_sdk_shared.so`，不修改
+系统安装或 SDK 源码。现有复制安装增量构建时应沿用复制模式，避免切换安装模式。
 测试与配置变更应按边界执行：驱动时间规则、融合时间/插值、PLIO/DLIO 回放及启动检查。
 现有测试位于 `plio/test/`、`odom_ws/test/`、`base_driver/tests/`、
 `navigation/src/test_control/tests/` 和 `debug/test_vision_odom.py`。

@@ -64,7 +64,7 @@ ament_target_dependencies(loop_detector rclcpp geometry_msgs sensor_msgs std_msg
 add_executable(pose_graph_backend src/pose_graph_backend.cpp)
 target_compile_features(pose_graph_backend PRIVATE cxx_std_17)
 target_include_directories(
-  pose_graph_backend PRIVATE ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
+  pose_graph_backend PRIVATE ../common ${PCL_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(
   pose_graph_backend ${PCL_LIBRARIES} gtsam ${cpp_typesupport_target})
 ament_target_dependencies(

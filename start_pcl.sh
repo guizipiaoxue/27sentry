@@ -13,20 +13,21 @@ set -u
 # 可通过 SDK_DIR 显式指定安装目录，否则按常见位置查找。
 SDK_DIRS=(
   "${SDK_DIR:-}"
+  "${SCRIPT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
+  "${SCRIPT_DIR}/livox/install/livox_ros_driver2/lib"
   "/usr/local/lib"
   "${SCRIPT_DIR}/../Livox-SDK2/build/sdk_core"
-  "${SCRIPT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
 )
 SDK_FOUND=""
 for dir in "${SDK_DIRS[@]}"; do
-  if [[ -n "${dir}" && -f "${dir}/liblivox_lidar_sdk_shared.so" ]]; then
+  if [[ -n "${dir}" && -f "${dir}/liblivox_lidar_sdk_sentry.so" ]]; then
     SDK_FOUND="${dir}"
     break
   fi
 done
 if [[ -z "${SDK_FOUND}" ]]; then
-  echo "[start_pcl] liblivox_lidar_sdk_shared.so not found." >&2
-  echo "           Set SDK_DIR=/path/to/lib or install it under /usr/local/lib." >&2
+  echo "[start_pcl] liblivox_lidar_sdk_sentry.so not found." >&2
+  echo "           Run bash livox/build_isolated_sdk.sh first (or set SDK_DIR to an isolated SDK)." >&2
   exit 1
 fi
 export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"

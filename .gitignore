@@ -10,4 +10,8 @@ doc/
 old/
 __pycache__/
 runlog/
+.livox_sdk/
 tools/
+scripts/
+!route/src/generate_map/scripts/
+!route/src/generate_map/scripts/*.py

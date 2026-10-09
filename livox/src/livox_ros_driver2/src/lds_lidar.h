@@ -33,6 +33,7 @@
 
 #include "lds.h"
 #include "comm/comm.h"
+#include "comm/lidar_health_monitor.h"
 
 #include "livox_lidar_def.h"
 
@@ -52,6 +53,10 @@ class LdsLidar final : public Lds {
   bool Start();
 
   int DeInitLdsLidar(void);
+  void ObserveLidarHealth(uint32_t handle, uint8_t device_type) {
+    health_monitor_.ObserveDevice(handle, device_type);
+  }
+  LidarHealthMonitor& health_monitor() { return health_monitor_; }
  private:
   LdsLidar(double publish_freq);
   LdsLidar(const LdsLidar &) = delete;
@@ -81,6 +86,7 @@ class LdsLidar final : public Lds {
 
  private:
   std::string path_;
+  LidarHealthMonitor health_monitor_;
   LidarSummaryInfo lidar_summary_info_;
 
   bool auto_connect_mode_;

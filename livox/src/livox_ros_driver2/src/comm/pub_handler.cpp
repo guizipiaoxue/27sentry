@@ -47,6 +47,87 @@ PubHandler &pub_handler() {
   return handler;
 }
 
+PubHandler::PubHandler() {
+  if (const char* session = std::getenv("SENTRY_RUNLOG_DIR")) {
+    if (*session) run_logger_ = std::make_unique<odom_logging::RunLogger>("driver");
+  }
+  timestamp_guard_.SetExpiryObserver([this](uint32_t handle, SensorStream stream,
+      uint64_t stamp, uint64_t arrival, uint64_t now, uint64_t generation) {
+    Diagnostic("PTP_EXPIRE", "ip=" + IpNumToString(handle) +
+        " stream=" + std::to_string(static_cast<int>(stream)) +
+        " last_utc_ns=" + std::to_string(stamp) +
+        " last_arrival_ns=" + std::to_string(arrival) +
+        " steady_ns=" + std::to_string(now) +
+        " age_ns=" + std::to_string(now >= arrival ? now - arrival : 0) +
+        " old_generation=" + std::to_string(generation));
+  });
+}
+
+void PubHandler::Diagnostic(const std::string& event, const std::string& payload) {
+  if (run_logger_) run_logger_->log(event, payload);
+  if (event != "PACKET_SUMMARY" && event != "PTP_HEARTBEAT") {
+    std::function<void(const std::string&, const std::string&)> observer;
+    {
+      std::lock_guard<std::mutex> lock(health_events_mutex_);
+      observer = health_events_;
+    }
+    if (observer) observer(event, payload);
+  }
+}
+
+std::string PubHandler::HealthSummary(uint32_t handle) {
+  std::lock_guard<std::mutex> lock(diagnostic_mutex_);
+  const auto now = SteadyNanoseconds();
+  std::string out;
+  for (auto stream : {SensorStream::kCloud, SensorStream::kImu}) {
+    const std::string name = stream == SensorStream::kCloud ? "cloud" : "imu";
+    const auto& flow = diagnostics_[{handle, stream}];
+    const bool timed_out = flow.arrival && now - flow.arrival >= health_timeout_ns_;
+    const bool accepted_stale = !flow.accepted_arrival || now - flow.accepted_arrival >= health_timeout_ns_;
+    out += " " + name + "_status=" + (!flow.arrival ? "not_received" : timed_out ? "timeout" :
+        flow.last_error != TimestampError::kNone || accepted_stale ? "rejected" : "receiving");
+    out += " " + name + "_age_ms=" + (flow.arrival ? std::to_string((now - flow.arrival) / 1000000) : "unknown");
+    out += " " + name + "_packets=" + std::to_string(flow.packets) +
+        " " + name + "_rejects=" + std::to_string(flow.rejects) +
+        " " + name + "_last_error=" + TimestampErrorName(flow.last_error);
+  }
+  return out;
+}
+
+void PubHandler::RecordArrival(uint32_t handle, SensorStream stream,
+    const LivoxLidarEthernetPacket& data, uint64_t arrival) {
+  std::lock_guard<std::mutex> lock(diagnostic_mutex_);
+  auto& flow = diagnostics_[{handle, stream}];
+  uint64_t wire = 0;
+  DecodeTimestamp(data.timestamp, sizeof(data.timestamp), wire);
+  const auto gap = flow.arrival ? arrival - flow.arrival : 0;
+  flow.max_gap = std::max(flow.max_gap, gap);
+  const auto delta = static_cast<uint16_t>(data.udp_cnt - flow.sequence);
+  if (flow.packets && delta != 1) ++flow.sequence_changes;
+  const std::string prefix = "ip=" + IpNumToString(handle) +
+      " stream=" + std::to_string(static_cast<int>(stream));
+  if (gap > 100000000ULL) {
+    Diagnostic("PACKET_GAP", prefix + " arrival_gap_ns=" + std::to_string(gap) +
+        " wire_delta_ns=" + std::to_string(static_cast<int64_t>(wire) - static_cast<int64_t>(flow.wire_stamp)) +
+        " wire_ns=" + std::to_string(wire) + " sequence=" + std::to_string(data.udp_cnt) +
+        " sequence_delta=" + std::to_string(delta) + " time_type=" + std::to_string(data.time_type));
+  }
+  flow.arrival = arrival;
+  flow.wire_stamp = wire;
+  flow.sequence = data.udp_cnt;
+  ++flow.packets;
+  if (!flow.summary || arrival - flow.summary >= 1000000000ULL) {
+    Diagnostic("PACKET_SUMMARY", prefix + " packets_total=" + std::to_string(flow.packets) +
+        " rejects_total=" + std::to_string(flow.rejects) +
+        " max_arrival_gap_ns=" + std::to_string(flow.max_gap) +
+        " sequence_nonunit_total=" + std::to_string(flow.sequence_changes) +
+        " wire_ns=" + std::to_string(wire) + " time_type=" + std::to_string(data.time_type) +
+        " steady_ns=" + std::to_string(arrival));
+    flow.summary = arrival;
+    flow.max_gap = 0;
+  }
+}
+
 void PubHandler::Init() {
 }
 
@@ -106,6 +187,13 @@ void PubHandler::SetPointCloudsCallback(PointCloudsCallback cb, void* client_dat
 void PubHandler::SetTimestampConfig(const TimestampConfig& config) {
   std::lock_guard<std::mutex> lock(timestamp_mutex_);
   timestamp_guard_.Configure(config);
+  {
+    std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mutex_);
+    health_timeout_ns_ = static_cast<uint64_t>(config.ptp_stream_timeout_seconds * 1e9);
+  }
+  Diagnostic("PTP_CONFIG", "utc_offset=" + std::to_string(config.ptp_utc_offset_seconds) +
+      " host_skew_s=" + std::to_string(config.ptp_max_host_skew_seconds) +
+      " timeout_s=" + std::to_string(config.ptp_stream_timeout_seconds));
 }
 
 void PubHandler::SetExpectedLidars(const std::vector<uint32_t>& handles) {
@@ -114,8 +202,14 @@ void PubHandler::SetExpectedLidars(const std::vector<uint32_t>& handles) {
 }
 
 bool PubHandler::IsPtpLocked() {
-  std::lock_guard<std::mutex> lock(timestamp_mutex_);
-  return timestamp_guard_.IsPtpLocked(SteadyNanoseconds());
+  const auto begin = SteadyNanoseconds();
+  std::unique_lock<std::mutex> lock(timestamp_mutex_);
+  const auto acquired = SteadyNanoseconds();
+  const bool locked = timestamp_guard_.IsPtpLocked(acquired);
+  lock.unlock();
+  Diagnostic("PTP_HEARTBEAT", "locked=" + std::to_string(locked) +
+      " steady_ns=" + std::to_string(acquired) + " lock_wait_ns=" + std::to_string(acquired - begin));
+  return locked;
 }
 
 bool PubHandler::IsCurrentGeneration(uint32_t handle, SensorStream stream,
@@ -129,23 +223,66 @@ bool PubHandler::PublishIfCurrent(uint32_t handle, SensorStream stream,
                                  const std::function<void()>& publish) {
   // Serialize the final publish with loss/reset so a queued old generation
   // cannot pass a check and then be published after that generation is lost.
-  std::lock_guard<std::mutex> lock(timestamp_mutex_);
-  if (!timestamp_guard_.IsCurrent(handle, stream, generation, SteadyNanoseconds()) ||
+  const auto begin = SteadyNanoseconds();
+  std::unique_lock<std::mutex> lock(timestamp_mutex_);
+  const auto acquired = SteadyNanoseconds();
+  if (!timestamp_guard_.IsCurrent(handle, stream, generation, acquired) ||
       !timestamp_guard_.IsFreshUtc(timestamp, UtcNanoseconds())) {
+    auto& count = stale_publish_counts_[{handle, stream}];
+    ++count.first;
+    const bool report = !count.second || acquired - count.second >= 1000000000ULL;
+    if (report) count.second = acquired;
+    const auto total = count.first;
+    lock.unlock();
+    if (report) Diagnostic("PUBLISH_STALE", "ip=" + IpNumToString(handle) +
+        " stream=" + std::to_string(static_cast<int>(stream)) +
+        " generation=" + std::to_string(generation) + " stamp_ns=" + std::to_string(timestamp) +
+        " drops_total=" + std::to_string(total));
     return false;
   }
   publish();
+  const auto finished = SteadyNanoseconds();
+  lock.unlock();
+  if (finished - acquired > 10000000ULL || acquired - begin > 10000000ULL) {
+    Diagnostic("PUBLISH_SLOW", "ip=" + IpNumToString(handle) +
+        " stream=" + std::to_string(static_cast<int>(stream)) +
+        " stamp_ns=" + std::to_string(timestamp) + " generation=" + std::to_string(generation) +
+        " lock_wait_ns=" + std::to_string(acquired - begin) +
+        " publish_ns=" + std::to_string(finished - acquired));
+  }
   return true;
 }
 
 TimestampResult PubHandler::ValidateTimestamp(
     uint32_t handle, SensorStream stream, const LivoxLidarEthernetPacket& data) {
+  const auto begin = SteadyNanoseconds();
   std::lock_guard<std::mutex> lock(timestamp_mutex_);
   const auto steady_ns = SteadyNanoseconds();
+  if (steady_ns - begin > 10000000ULL) Diagnostic("RX_LOCK_WAIT", "ip=" + IpNumToString(handle) +
+      " stream=" + std::to_string(static_cast<int>(stream)) +
+      " wait_ns=" + std::to_string(steady_ns - begin));
+  const auto host_ns = UtcNanoseconds();
   const auto result = timestamp_guard_.Accept(
       handle, stream, data.time_type, data.timestamp, sizeof(data.timestamp),
-      UtcNanoseconds(), steady_ns);
+      host_ns, steady_ns);
   if (!result.accepted) {
+    {
+      std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mutex_);
+      auto& flow = diagnostics_[{handle, stream}];
+      ++flow.rejects;
+      flow.last_error = result.error;
+      const auto reason_count = ++flow.reasons[result.error];
+      if (reason_count == 1 || !flow.last_reject_log || steady_ns - flow.last_reject_log >= 1000000000ULL) {
+        uint64_t wire = 0;
+        DecodeTimestamp(data.timestamp, sizeof(data.timestamp), wire);
+        Diagnostic("PTP_REJECT", "ip=" + IpNumToString(handle) +
+            " stream=" + std::to_string(static_cast<int>(stream)) +
+            " reason=" + TimestampErrorName(result.error) + " wire_ns=" + std::to_string(wire) +
+            " host_utc_ns=" + std::to_string(host_ns) + " time_type=" + std::to_string(data.time_type) +
+            " generation=" + std::to_string(result.generation) + " rejects_total=" + std::to_string(flow.rejects) + " reason_total=" + std::to_string(reason_count));
+        flow.last_reject_log = steady_ns;
+      }
+    }
     auto& last_warning = timestamp_warning_times_[{handle, stream}];
     if (last_warning == 0 || steady_ns - last_warning >= 3000000000ULL) {
       last_warning = steady_ns;
@@ -155,6 +292,12 @@ TimestampResult PubHandler::ValidateTimestamp(
                 << static_cast<unsigned>(data.time_type) << ")" << std::endl;
     }
   }
+  if (result.accepted) {
+    std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mutex_);
+    auto& flow = diagnostics_[{handle, stream}];
+    flow.accepted_arrival = steady_ns;
+    flow.last_error = TimestampError::kNone;
+  }
   return result;
 }
 
@@ -162,9 +305,18 @@ void PubHandler::RejectPacket(uint32_t handle, SensorStream stream) {
   std::lock_guard<std::mutex> lock(timestamp_mutex_);
   timestamp_guard_.Invalidate(handle, TimestampError::kInvalidPacket, SteadyNanoseconds());
   const auto now_ns = SteadyNanoseconds();
+  {
+    std::lock_guard<std::mutex> diagnostic_lock(diagnostic_mutex_);
+    auto& flow = diagnostics_[{handle, stream}];
+    flow.arrival = now_ns;
+    ++flow.rejects;
+    flow.last_error = TimestampError::kInvalidPacket;
+  }
   auto& last_warning = timestamp_warning_times_[{handle, stream}];
   if (last_warning == 0 || now_ns - last_warning >= 3000000000ULL) {
     last_warning = now_ns;
+    Diagnostic("PTP_MALFORMED", "ip=" + IpNumToString(handle) +
+        " stream=" + std::to_string(static_cast<int>(stream)));
     std::cerr << "PTP: dropping malformed packet from " << IpNumToString(handle)
               << " " << (stream == SensorStream::kImu ? "IMU" : "cloud")
               << std::endl;
@@ -177,11 +329,24 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t d
   if (!self || !data) return;
   const bool is_imu = data->data_type == kLivoxLidarImuData;
   const auto stream = is_imu ? SensorStream::kImu : SensorStream::kCloud;
+  const auto callback_begin = SteadyNanoseconds();
+  struct CallbackTiming {
+    PubHandler* self; uint32_t handle; SensorStream stream; uint64_t begin;
+    ~CallbackTiming() {
+      const auto duration = SteadyNanoseconds() - begin;
+      if (duration > 10000000ULL) self->Diagnostic("SDK_CALLBACK_SLOW",
+          "ip=" + IpNumToString(handle) + " stream=" + std::to_string(static_cast<int>(stream)) +
+          " duration_ns=" + std::to_string(duration));
+    }
+  } timing{self, handle, stream, callback_begin};
   const uint32_t header_size = sizeof(LivoxLidarEthernetPacket) - 1;
   if (data->length < header_size || (!is_imu && data->dot_num == 0)) {
     self->RejectPacket(handle, stream);
     return;
   }
+  // Inspect wire diagnostics only after the packet header passes validation;
+  // the captured arrival still precedes validation and the timestamp lock.
+  self->RecordArrival(handle, stream, *data, callback_begin);
   const uint32_t length = data->length - header_size;
   std::size_t raw_point_size = 0;
   switch (data->data_type) {
@@ -243,6 +408,8 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t d
   {
     std::unique_lock<std::mutex> lock(self->packet_mutex_);
     self->raw_packet_queue_.push_back(std::move(packet));
+    if (self->raw_packet_queue_.size() % 1000 == 0) self->Diagnostic("RAW_QUEUE_BACKLOG",
+        "packets=" + std::to_string(self->raw_packet_queue_.size()));
   }
   self->packet_condition_.notify_one();
 }

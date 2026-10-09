@@ -115,20 +115,21 @@ set -u
 # tree and local driver fallback in addition to /usr/local/lib.
 SDK_DIRS=(
   "${SDK_DIR:-}"
+  "${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
+  "${ROOT_DIR}/livox/install/livox_ros_driver2/lib"
   "/usr/local/lib"
   "${ROOT_DIR}/../Livox-SDK2/build/sdk_core"
-  "${ROOT_DIR}/livox/src/livox_ros_driver2/.livox_sdk/lib"
 )
 SDK_FOUND=""
 for sdk_dir in "${SDK_DIRS[@]}"; do
-  if [[ -n "${sdk_dir}" && -f "${sdk_dir}/liblivox_lidar_sdk_shared.so" ]]; then
+  if [[ -n "${sdk_dir}" && -f "${sdk_dir}/liblivox_lidar_sdk_sentry.so" ]]; then
     SDK_FOUND="${sdk_dir}"
     break
   fi
 done
 if [[ -z "${SDK_FOUND}" ]]; then
-  echo "[rotate_cali] liblivox_lidar_sdk_shared.so not found." >&2
-  echo "              Set SDK_DIR=/path/to/sdk/library." >&2
+  echo "[rotate_cali] liblivox_lidar_sdk_sentry.so not found." >&2
+  echo "              Run bash livox/build_isolated_sdk.sh first (or set SDK_DIR to an isolated SDK)." >&2
   exit 1
 fi
 export LD_LIBRARY_PATH="${SDK_FOUND}:${LD_LIBRARY_PATH:-}"

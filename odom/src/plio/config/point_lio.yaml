@@ -56,7 +56,7 @@
     # 初始化所需点数和扫描帧数；增加帧数可延后匹配启用。
     mapping.initialization_scans: 5
     # 每个体素最多保存的点数；减小可降低内存和匹配计算量。
-    mapping.ivox_max_points_per_voxel: 32
+    mapping.ivox_max_points_per_voxel: 128
     # 体素滤波后参与逐点匹配的点数上限；减小可加速但可能损失精度。
     mapping.max_tracking_points: 2000
     # 点时间分箱宽度（毫秒）；增大可减少重复去畸变/滤波更新，但快速转动时会增加运动畸变。
